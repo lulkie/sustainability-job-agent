@@ -566,6 +566,39 @@ def load_seen_jobs() -> set:
 
 def save_seen_jobs(seen: set):
     SEEN_JOBS_FILE.write_text(json.dumps(list(seen)))
+def is_outdated(job: dict) -> bool:
+    """Return True if the job was posted more than 3 months ago."""
+    import re
+    from datetime import datetime, timedelta
+    cutoff = datetime.now() - timedelta(days=90)
+    
+    # Check date_posted field first
+    date_str = job.get("date_posted", "")
+    if date_str:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%B %d, %Y", "%d %B %Y"):
+            try:
+                parsed = datetime.strptime(str(date_str)[:10], fmt)
+                return parsed < cutoff
+            except ValueError:
+                continue
+
+    # Check description for date patterns
+    text = job.get("description", "")
+    if not text:
+        return False
+
+    # Look for patterns like "January 2024", "jan 2024", "2024-01"
+    months = r"(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
+    pattern = rf"{months}[\s,]+(\d{{4}})"
+    matches = re.findall(pattern, text.lower())
+    for month_str, year_str in matches:
+        try:
+            parsed = datetime.strptime(f"{month_str[:3]} {year_str}", "%b %Y")
+            if parsed < cutoff:
+                return True
+        except ValueError:
+            continue
+    return False
 
 def is_too_senior(job: dict) -> bool:
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
@@ -654,6 +687,9 @@ def run_agent():
 
     new_jobs = [j for j in new_jobs if not is_too_senior(j)]
     print(f"[Filter] {len(new_jobs)} after seniority filter")
+
+    new_jobs = [j for j in new_jobs if not is_outdated(j)]
+    print(f"[Filter] {len(new_jobs)} after outdated filter")
 
     if not new_jobs:
         print("\n[Done] No new jobs this run.")
