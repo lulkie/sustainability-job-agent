@@ -1,0 +1,43 @@
+name: Sustainability Job Agent
+
+on:
+  schedule:
+    - cron: "0 7 */3 * *"   # Every 3 days at 7am UTC
+  workflow_dispatch:          # Also allows manual runs from GitHub UI
+
+jobs:
+  scrape-jobs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install anthropic requests beautifulsoup4 python-dotenv
+
+      - name: Restore seen jobs cache
+        uses: actions/cache@v4
+        with:
+          path: seen_jobs.json
+          key: seen-jobs-${{ github.run_id }}
+          restore-keys: |
+            seen-jobs-
+
+      - name: Run job agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python job_agent.py
+
+      - name: Save seen jobs cache
+        uses: actions/cache@v4
+        with:
+          path: seen_jobs.json
+          key: seen-jobs-${{ github.run_id }}
