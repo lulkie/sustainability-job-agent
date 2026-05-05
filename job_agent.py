@@ -455,6 +455,8 @@ Return ONLY the JSON array."""
 
 def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
     """Push scored jobs to a Notion database."""
+    print(f"  [Notion] API key: {NOTION_API_KEY[:15] if NOTION_API_KEY else 'NOT SET'}")
+    print(f"  [Notion] Database ID: {NOTION_DATABASE_ID if NOTION_DATABASE_ID else 'NOT SET'}")
     if not NOTION_API_KEY or not NOTION_DATABASE_ID:
         print("  [Notion] No credentials set — skipping Notion push.")
         return
