@@ -466,7 +466,22 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28",
     }
-
+# Search for accessible databases
+    try:
+        search_resp = requests.post(
+            "https://api.notion.com/v1/search",
+            headers=headers,
+            json={"filter": {"property": "object", "value": "database"}},
+            timeout=15
+        )
+        results = search_resp.json().get("results", [])
+        print(f"  [Notion] Integration can see {len(results)} databases:")
+        for r in results:
+            title = r.get("title", [{}])
+            name = title[0].get("plain_text", "Untitled") if title else "Untitled"
+            print(f"    - {name}: {r['id']}")
+    except Exception as e:
+        print(f"  [Notion] Search error: {e}")
     all_to_push = [(j, False) for j in jobs if j.get("score", 0) >= MIN_SCORE]
     all_to_push += [(j, True) for j in spontaneous]
 
