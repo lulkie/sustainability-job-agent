@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install anthropic requests beautifulsoup4 python-dotenv
+        run: pip install anthropic requests beautifulsoup4 python-dotenv schedule
 
       - name: Restore seen jobs cache
         uses: actions/cache@v4
