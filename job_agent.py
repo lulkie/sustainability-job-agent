@@ -174,6 +174,192 @@ def scrape_vdab(keyword: str) -> list[dict]:
     return jobs
 
 
+def scrape_jobat(query: str) -> list[dict]:
+    """Scrape Jobat.be — biggest Belgian job board."""
+    jobs = []
+    try:
+        url = "https://www.jobat.be/en/jobs"
+        params = {"q": query, "r": "BE", "sort": "date"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article.job, div.job-card, li.job-item, div[class*='vacancy']")[:20]:
+            title_el = card.select_one("h2, h3, .job-title, [class*='title']")
+            company_el = card.select_one(".company, .employer, [class*='company']")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.jobat.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Jobat"})
+        print(f"  → {len(jobs)} from Jobat")
+    except Exception as e:
+        print(f"  [Jobat error]: {e}")
+    return jobs
+
+
+def scrape_stepstone(query: str) -> list[dict]:
+    """Scrape Stepstone.be."""
+    jobs = []
+    try:
+        url = f"https://www.stepstone.be/jobs/{requests.utils.quote(query)}/in-belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article[data-at='job-item'], div.job-ad, li[class*='job']")[:20]:
+            title_el = card.select_one("h2, h3, [data-at='job-item-title'], .job-title")
+            company_el = card.select_one("[data-at='job-item-company-name'], .company-name")
+            location_el = card.select_one("[data-at='job-item-location'], .location")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Belgium"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.stepstone.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": location, "url": href, "description": "",
+                             "date_posted": "", "source": "Stepstone"})
+        print(f"  → {len(jobs)} from Stepstone")
+    except Exception as e:
+        print(f"  [Stepstone error]: {e}")
+    return jobs
+
+
+def scrape_euroclimatejobs() -> list[dict]:
+    """Scrape EuroClimateJobs for Belgium."""
+    jobs = []
+    try:
+        url = "https://www.euroclimatejobs.com/jobs/belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article.job, li.job-listing, tr.job-row")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a[href*='job']")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.euroclimatejobs.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "EuroClimateJobs"})
+        print(f"  → {len(jobs)} from EuroClimateJobs")
+    except Exception as e:
+        print(f"  [EuroClimateJobs error]: {e}")
+    return jobs
+
+
+def scrape_eurobrussels() -> list[dict]:
+    """Scrape EuroBrussels for environment/sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.eurobrussels.com/jobs/environment"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a.job-link")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.eurobrussels.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "EuroBrussels"})
+        print(f"  → {len(jobs)} from EuroBrussels")
+    except Exception as e:
+        print(f"  [EuroBrussels error]: {e}")
+    return jobs
+
+
+def scrape_brussels_sustainability_club() -> list[dict]:
+    """Scrape Brussels Sustainability Club job board."""
+    jobs = []
+    try:
+        url = "https://brusselssustainabilityclub.com/jobs/"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Brussels Sustainability Club"})
+        print(f"  → {len(jobs)} from Brussels Sustainability Club")
+    except Exception as e:
+        print(f"  [Brussels Sustainability Club error]: {e}")
+    return jobs
+
+
+def scrape_actiris(keyword: str) -> list[dict]:
+    """Scrape Actiris — Brussels regional employment service."""
+    jobs = []
+    try:
+        url = "https://www.actiris.brussels/en/citizens/find-a-job/"
+        params = {"q": keyword}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.vacancy, div[class*='offer']")[:20]:
+            title_el = card.select_one("h2, h3, .job-title, .offer-title")
+            company_el = card.select_one(".company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.actiris.brussels" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Actiris"})
+        print(f"  → {len(jobs)} from Actiris")
+    except Exception as e:
+        print(f"  [Actiris error]: {e}")
+    return jobs
+
+
+def scrape_glassdoor(query: str) -> list[dict]:
+    """Scrape Glassdoor for Belgium sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.glassdoor.com/Job/belgium-sustainability-jobs-SRCH_IL.0,7_IN25_KO8,22.htm"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("li[data-test='jobListing'], div.jobCard, article.job")[:20]:
+            title_el = card.select_one("[data-test='job-title'], .job-title, h2, h3")
+            company_el = card.select_one("[data-test='employer-name'], .employer-name, .company")
+            location_el = card.select_one("[data-test='emp-location'], .location")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Belgium"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.glassdoor.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": location, "url": href, "description": "",
+                             "date_posted": "", "source": "Glassdoor"})
+        print(f"  → {len(jobs)} from Glassdoor")
+    except Exception as e:
+        print(f"  [Glassdoor error]: {e}")
+    return jobs
+
+
 def fetch_description(url: str) -> str:
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
@@ -382,29 +568,61 @@ def run_agent():
     seen = load_seen_jobs()
     all_jobs = []
 
-    searches = {
-        "linkedin": ["sustainability consultant Belgium", "ESG CSRD analyst Belgium",
-                     "environmental project manager Belgium", "duurzaamheid adviseur",
-                     "climate policy Belgium"],
-        "indeed":   ["sustainability officer Belgium", "ESG reporting Belgium",
-                     "circular economy Belgium", "sustainability communications Belgium"],
-        "vdab":     ["duurzaamheid", "ESG", "milieu", "CSRD", "klimaat"],
-    }
+    linkedin_queries = ["sustainability consultant Belgium", "ESG CSRD analyst Belgium",
+                        "environmental project manager Belgium", "duurzaamheid adviseur",
+                        "climate policy Belgium"]
+    indeed_queries   = ["sustainability officer Belgium", "ESG reporting Belgium",
+                        "circular economy Belgium", "sustainability communications Belgium"]
+    vdab_keywords    = ["duurzaamheid", "ESG", "milieu", "CSRD", "klimaat"]
+    jobat_queries    = ["sustainability", "ESG", "duurzaamheid", "milieu adviseur"]
+    stepstone_queries= ["sustainability Belgium", "ESG Belgium", "duurzaamheid"]
+    actiris_keywords = ["sustainability", "environment", "duurzaamheid", "ESG"]
 
-    for q in searches["linkedin"]:
+    for q in linkedin_queries:
         print(f"[LinkedIn] '{q}'")
         all_jobs.extend(scrape_linkedin(q))
         time.sleep(3)
 
-    for q in searches["indeed"]:
+    for q in indeed_queries:
         print(f"[Indeed]   '{q}'")
         all_jobs.extend(scrape_indeed(q))
         time.sleep(3)
 
-    for k in searches["vdab"]:
+    for k in vdab_keywords:
         print(f"[VDAB]     '{k}'")
         all_jobs.extend(scrape_vdab(k))
         time.sleep(2)
+
+    for q in jobat_queries:
+        print(f"[Jobat]    '{q}'")
+        all_jobs.extend(scrape_jobat(q))
+        time.sleep(2)
+
+    for q in stepstone_queries:
+        print(f"[Stepstone] '{q}'")
+        all_jobs.extend(scrape_stepstone(q))
+        time.sleep(2)
+
+    for k in actiris_keywords:
+        print(f"[Actiris]  '{k}'")
+        all_jobs.extend(scrape_actiris(k))
+        time.sleep(2)
+
+    print(f"[EuroClimateJobs]")
+    all_jobs.extend(scrape_euroclimatejobs())
+    time.sleep(2)
+
+    print(f"[EuroBrussels]")
+    all_jobs.extend(scrape_eurobrussels())
+    time.sleep(2)
+
+    print(f"[Brussels Sustainability Club]")
+    all_jobs.extend(scrape_brussels_sustainability_club())
+    time.sleep(2)
+
+    print(f"[Glassdoor]")
+    all_jobs.extend(scrape_glassdoor("sustainability Belgium"))
+    time.sleep(2)
 
     all_jobs = deduplicate(all_jobs)
     print(f"\n[Filter] {len(all_jobs)} unique jobs")
