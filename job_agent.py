@@ -455,8 +455,6 @@ Return ONLY the JSON array."""
 
 def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
     """Push scored jobs to a Notion database."""
-    print(f"  [Notion] API key: {NOTION_API_KEY[:15] if NOTION_API_KEY else 'NOT SET'}")
-    print(f"  [Notion] Database ID: {NOTION_DATABASE_ID if NOTION_DATABASE_ID else 'NOT SET'}")
     if not NOTION_API_KEY or not NOTION_DATABASE_ID:
         print("  [Notion] No credentials set — skipping Notion push.")
         return
@@ -466,26 +464,6 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28",
     }
-# Auto-find the Job applications database
-    db_id = NOTION_DATABASE_ID
-    try:
-        search_resp = requests.post(
-            "https://api.notion.com/v1/search",
-            headers=headers,
-            json={"filter": {"property": "object", "value": "database"}},
-            timeout=15
-        )
-        results = search_resp.json().get("results", [])
-        print(f"  [Notion] Integration can see {len(results)} databases:")
-        for r in results:
-            title = r.get("title", [{}])
-            name = title[0].get("plain_text", "Untitled") if title else "Untitled"
-            print(f"    - {name}: {r['id']}")
-            if "job" in name.lower() or "application" in name.lower():
-                db_id = r["id"]
-                print(f"  [Notion] Auto-selected: {name} ({db_id})")
-    except Exception as e:
-        print(f"  [Notion] Search error: {e}")
 
     all_to_push = [(j, False) for j in jobs if j.get("score", 0) >= MIN_SCORE]
     all_to_push += [(j, True) for j in spontaneous]
@@ -505,7 +483,7 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
             score_label = "⭐ Moderate"
 
         payload = {
-           "parent": {"database_id": db_id},
+            "parent": {"database_id": NOTION_DATABASE_ID},
             "properties": {
                 "Job Title": {
                     "title": [{"text": {"content": job.get("title", "")}}]
@@ -566,39 +544,134 @@ def load_seen_jobs() -> set:
 
 def save_seen_jobs(seen: set):
     SEEN_JOBS_FILE.write_text(json.dumps(list(seen)))
-def is_outdated(job: dict) -> bool:
-    """Return True if the job was posted more than 3 months ago."""
+
+def scrape_greenjobs() -> list[dict]:
+    """Scrape Greenjobs.nl for Belgian sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://greenjobs.nl/en/sustainable-jobs/?location=Belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job-item, div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://greenjobs.nl" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Greenjobs.nl"})
+        print(f"  → {len(jobs)} from Greenjobs.nl")
+    except Exception as e:
+        print(f"  [Greenjobs error]: {e}")
+    return jobs
+
+
+def scrape_impactjob() -> list[dict]:
+    """Scrape Impactjob.be for Belgian impact/sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.impactjob.be/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.impactjob.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Impactjob.be"})
+        print(f"  → {len(jobs)} from Impactjob.be")
+    except Exception as e:
+        print(f"  [Impactjob error]: {e}")
+    return jobs
+
+
+def scrape_climatebase() -> list[dict]:
+    """Scrape Climatebase for Belgium climate jobs."""
+    jobs = []
+    try:
+        url = "https://climatebase.org/jobs?l=Belgium&q=sustainability"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, a[href*='/jobs/']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, .title")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://climatebase.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Climatebase"})
+        print(f"  → {len(jobs)} from Climatebase")
+    except Exception as e:
+        print(f"  [Climatebase error]: {e}")
+    return jobs
+
+
+def scrape_terraincognita() -> list[dict]:
+    """Scrape Terra Incognita — Belgian NGO and sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.terraincognita.be/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.terraincognita.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Terra Incognita"})
+        print(f"  → {len(jobs)} from Terra Incognita")
+    except Exception as e:
+        print(f"  [Terra Incognita error]: {e}")
+    return jobs
+
+
+def is_too_much_experience(job: dict) -> bool:
+    """Return True if the job explicitly requires more than 3 years of experience."""
     import re
-    from datetime import datetime, timedelta
-    cutoff = datetime.now() - timedelta(days=90)
-    
-    # Check date_posted field first
-    date_str = job.get("date_posted", "")
-    if date_str:
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%B %d, %Y", "%d %B %Y"):
-            try:
-                parsed = datetime.strptime(str(date_str)[:10], fmt)
-                return parsed < cutoff
-            except ValueError:
-                continue
+    text = (job.get("title", "") + " " + job.get("description", "")).lower()
 
-    # Check description for date patterns
-    text = job.get("description", "")
-    if not text:
-        return False
-
-    # Look for patterns like "January 2024", "jan 2024", "2024-01"
-    months = r"(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
-    pattern = rf"{months}[\s,]+(\d{{4}})"
-    matches = re.findall(pattern, text.lower())
-    for month_str, year_str in matches:
-        try:
-            parsed = datetime.strptime(f"{month_str[:3]} {year_str}", "%b %Y")
-            if parsed < cutoff:
+    # Patterns like "4 years", "5+ years", "minimum 4 jaar", "10 years experience"
+    patterns = [
+        r'(\d+)\s*\+?\s*years?\s*(of\s*)?(experience|exp)',
+        r'(\d+)\s*\+?\s*jaar\s*(ervaring|werkervaring)',
+        r'minimum\s*(\d+)\s*(years?|jaar)',
+        r'at\s*least\s*(\d+)\s*years?',
+        r'minstens\s*(\d+)\s*jaar',
+        r'(\d+)\s*to\s*\d+\s*years?\s*(of\s*)?experience',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for match in matches:
+            # Extract the first number from the match tuple
+            years = int(match[0]) if match[0].isdigit() else 0
+            if years > 3:
                 return True
-        except ValueError:
-            continue
     return False
+
 
 def is_too_senior(job: dict) -> bool:
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
@@ -679,6 +752,22 @@ def run_agent():
     all_jobs.extend(scrape_glassdoor("sustainability Belgium"))
     time.sleep(2)
 
+    print(f"[Greenjobs]")
+    all_jobs.extend(scrape_greenjobs())
+    time.sleep(2)
+
+    print(f"[Impactjob]")
+    all_jobs.extend(scrape_impactjob())
+    time.sleep(2)
+
+    print(f"[Climatebase]")
+    all_jobs.extend(scrape_climatebase())
+    time.sleep(2)
+
+    print(f"[Terra Incognita]")
+    all_jobs.extend(scrape_terraincognita())
+    time.sleep(2)
+
     all_jobs = deduplicate(all_jobs)
     print(f"\n[Filter] {len(all_jobs)} unique jobs")
 
@@ -688,8 +777,8 @@ def run_agent():
     new_jobs = [j for j in new_jobs if not is_too_senior(j)]
     print(f"[Filter] {len(new_jobs)} after seniority filter")
 
-    new_jobs = [j for j in new_jobs if not is_outdated(j)]
-    print(f"[Filter] {len(new_jobs)} after outdated filter")
+    new_jobs = [j for j in new_jobs if not is_too_much_experience(j)]
+    print(f"[Filter] {len(new_jobs)} after experience filter (max 3 years)")
 
     if not new_jobs:
         print("\n[Done] No new jobs this run.")
