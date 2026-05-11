@@ -506,6 +506,9 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
                 "URL": {
                     "url": job.get("url", "") or None
                 },
+                "Category": {
+                    "select": {"name": job.get("category", "General")}
+                },
                 "Reasoning": {
                     "rich_text": [{"text": {"content": job.get("reasoning", "")[:2000]}}]
                 },
@@ -698,76 +701,129 @@ def run_agent():
 
     linkedin_queries = ["sustainability consultant Belgium", "ESG CSRD analyst Belgium",
                         "environmental project manager Belgium", "duurzaamheid adviseur",
-                        "climate policy Belgium"]
+                        "climate policy Belgium", "NGO sustainability Belgium",
+                        "environmental communications Belgium", "sustainability advocacy Belgium",
+                        "corporate social responsibility Belgium"]
     indeed_queries   = ["sustainability officer Belgium", "ESG reporting Belgium",
-                        "circular economy Belgium", "sustainability communications Belgium"]
-    vdab_keywords    = ["duurzaamheid", "ESG", "milieu", "CSRD", "klimaat"]
-    jobat_queries    = ["sustainability", "ESG", "duurzaamheid", "milieu adviseur"]
-    stepstone_queries= ["sustainability Belgium", "ESG Belgium", "duurzaamheid"]
-    actiris_keywords = ["sustainability", "environment", "duurzaamheid", "ESG"]
+                        "circular economy Belgium", "sustainability communications Belgium",
+                        "environmental policy Belgium", "climate advocacy Belgium",
+                        "NGO environment Belgium"]
+    vdab_keywords    = ["duurzaamheid", "ESG", "milieu", "CSRD", "klimaat",
+                        "milieubeleid", "duurzame ontwikkeling"]
+    jobat_queries    = ["sustainability", "ESG", "duurzaamheid", "milieu adviseur",
+                        "NGO", "beleidsmedewerker milieu"]
+    stepstone_queries= ["sustainability Belgium", "ESG Belgium", "duurzaamheid",
+                        "environmental policy Belgium"]
+    actiris_keywords = ["sustainability", "environment", "duurzaamheid", "ESG",
+                        "politique environnementale", "NGO Brussels"]
+    eu_queries       = ["sustainability European Commission", "environment European Commission",
+                        "ESG EU institutions Belgium", "climate policy EU Brussels",
+                        "environmental officer EU agency", "European Environment Agency",
+                        "EU Green Deal policy officer"]
 
     for q in linkedin_queries:
         print(f"[LinkedIn] '{q}'")
-        all_jobs.extend(scrape_linkedin(q))
+        jobs = scrape_linkedin(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
         time.sleep(3)
 
     for q in indeed_queries:
         print(f"[Indeed]   '{q}'")
-        all_jobs.extend(scrape_indeed(q))
+        jobs = scrape_indeed(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
         time.sleep(3)
 
     for k in vdab_keywords:
         print(f"[VDAB]     '{k}'")
-        all_jobs.extend(scrape_vdab(k))
+        jobs = scrape_vdab(k)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
         time.sleep(2)
 
     for q in jobat_queries:
         print(f"[Jobat]    '{q}'")
-        all_jobs.extend(scrape_jobat(q))
+        jobs = scrape_jobat(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
         time.sleep(2)
 
     for q in stepstone_queries:
         print(f"[Stepstone] '{q}'")
-        all_jobs.extend(scrape_stepstone(q))
+        jobs = scrape_stepstone(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
         time.sleep(2)
 
     for k in actiris_keywords:
         print(f"[Actiris]  '{k}'")
-        all_jobs.extend(scrape_actiris(k))
+        jobs = scrape_actiris(k)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
         time.sleep(2)
 
-    print(f"[EuroClimateJobs]")
-    all_jobs.extend(scrape_euroclimatejobs())
+    for q in eu_queries:
+        print(f"[LinkedIn EU] '{q}'")
+        jobs = scrape_linkedin(q)
+        for j in jobs: j["category"] = "EU/Policy"
+        all_jobs.extend(jobs)
+        time.sleep(3)
+
+    for q in eu_queries:
+        print(f"[Indeed EU] '{q}'")
+        jobs = scrape_indeed(q)
+        for j in jobs: j["category"] = "EU/Policy"
+        all_jobs.extend(jobs)
+        time.sleep(3)
+
+   print(f"[EuroClimateJobs]")
+    jobs = scrape_euroclimatejobs()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[EuroBrussels]")
-    all_jobs.extend(scrape_eurobrussels())
+    jobs = scrape_eurobrussels()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[Brussels Sustainability Club]")
-    all_jobs.extend(scrape_brussels_sustainability_club())
+    jobs = scrape_brussels_sustainability_club()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[Glassdoor]")
-    all_jobs.extend(scrape_glassdoor("sustainability Belgium"))
+    jobs = scrape_glassdoor("sustainability Belgium")
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[Greenjobs]")
-    all_jobs.extend(scrape_greenjobs())
+    jobs = scrape_greenjobs()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[Impactjob]")
-    all_jobs.extend(scrape_impactjob())
+    jobs = scrape_impactjob()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[Climatebase]")
-    all_jobs.extend(scrape_climatebase())
+    jobs = scrape_climatebase()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
 
     print(f"[Terra Incognita]")
-    all_jobs.extend(scrape_terraincognita())
+    jobs = scrape_terraincognita()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
     time.sleep(2)
-
     all_jobs = deduplicate(all_jobs)
     print(f"\n[Filter] {len(all_jobs)} unique jobs")
 
