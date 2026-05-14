@@ -17,6 +17,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import anthropic
+from company_scraper import run_company_scraper, maybe_discover_new_companies
 
 load_dotenv()
 
@@ -846,8 +847,17 @@ def run_agent():
             j["description"] = fetch_description(j["url"])
             time.sleep(1)
 
-    print(f"\n[Claude] Scoring {len(new_jobs)} jobs...")
-    scored = score_jobs_with_claude(new_jobs)
+# --- AI scoring ---
+    print(f"\n[Claude] Scoring {len(new_jobs)} jobs with AI...")
+    scored_jobs = score_jobs_with_claude(new_jobs)
+
+    # --- Company careers pages (direct scraping) ---
+    print(f"\n[Company scraper] Scraping company careers pages...")
+    company_jobs = run_company_scraper()
+    scored_jobs.extend(company_jobs)
+
+    # --- Weekly auto-discovery of new companies ---
+    maybe_discover_new_companies()
 
     spontaneous = []
     seen_companies = set()
