@@ -783,13 +783,11 @@ def run_agent():
     for j in jobs: j["category"] = "General"
     all_jobs.extend(jobs)
     time.sleep(2)
-
     print(f"[EuroBrussels]")
     jobs = scrape_eurobrussels()
     for j in jobs: j["category"] = "EU/Policy"
     all_jobs.extend(jobs)
     time.sleep(2)
-
     print(f"[Brussels Sustainability Club]")
     jobs = scrape_brussels_sustainability_club()
     for j in jobs: j["category"] = "General"
