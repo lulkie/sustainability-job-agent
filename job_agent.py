@@ -778,7 +778,7 @@ def run_agent():
         all_jobs.extend(jobs)
         time.sleep(3)
 
-   print(f"[EuroClimateJobs]")
+    print(f"[EuroClimateJobs]")
     jobs = scrape_euroclimatejobs()
     for j in jobs: j["category"] = "General"
     all_jobs.extend(jobs)
