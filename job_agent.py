@@ -859,20 +859,17 @@ def run_agent():
 
     spontaneous = []
     seen_companies = set()
-    for j in scored:
+    for j in scored_jobs:
         if j.get("spontaneous_worthy") and j.get("score", 0) < MIN_SCORE:
             c = j.get("company", "")
             if c and c not in seen_companies:
                 seen_companies.add(c)
                 spontaneous.append(j.copy())
-
-    save_seen_jobs(seen | {j["id"] for j in scored})
-
-    good = sum(1 for j in scored if j.get("score", 0) >= MIN_SCORE)
+    save_seen_jobs(seen | {j["id"] for j in scored_jobs})
+    good = sum(1 for j in scored_jobs if j.get("score", 0) >= MIN_SCORE)
     print(f"\n[Results] {good} strong matches + {len(spontaneous)} spontaneous leads")
-
     print(f"\n[Notion] Pushing to Notion...")
-    push_to_notion(scored, spontaneous)
+    push_to_notion(scored_jobs, spontaneous)
 
     print(f"\n[Done] Check your Notion database for new jobs!")
 
