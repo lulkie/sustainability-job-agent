@@ -361,6 +361,87 @@ def scrape_glassdoor(query: str) -> list[dict]:
     return jobs
 
 
+def scrape_epso() -> list[dict]:
+    """Scrape EPSO — EU institutions official job board."""
+    jobs = []
+    try:
+        url = "https://epso.europa.eu/en/job-opportunities/open-for-application"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.ecl-content-item, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .ecl-content-item__title, a")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://epso.europa.eu" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": "EU Institution",
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "EPSO"})
+        print(f"  → {len(jobs)} from EPSO")
+    except Exception as e:
+        print(f"  [EPSO error]: {e}")
+    return jobs
+
+
+def scrape_euraxess() -> list[dict]:
+    """Scrape Euraxess — EU research and policy jobs."""
+    jobs = []
+    try:
+        url = "https://euraxess.ec.europa.eu/jobs/search?f[0]=field_job_country:Belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.views-row, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .field-title, a")
+            company_el = card.select_one(".field-organisation, .company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else "EU/Research"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://euraxess.ec.europa.eu" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Euraxess"})
+        print(f"  → {len(jobs)} from Euraxess")
+    except Exception as e:
+        print(f"  [Euraxess error]: {e}")
+    return jobs
+
+
+def get_rejected_companies() -> set:
+    """Read companies marked as rejected in Notion."""
+    if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+        return set()
+    rejected = set()
+    try:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+        headers = {
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "filter": {
+                "property": "Reject Company",
+                "checkbox": {"equals": True}
+            },
+            "page_size": 100,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        data = resp.json()
+        for page in data.get("results", []):
+            company_prop = page.get("properties", {}).get("Company", {})
+            rich_text = company_prop.get("rich_text", [])
+            if rich_text:
+                rejected.add(rich_text[0]["text"]["content"].lower().strip())
+    except Exception as e:
+        print(f"  [Notion] Could not fetch rejected companies: {e}")
+    return rejected
+
+
 def fetch_description(url: str) -> str:
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
@@ -418,6 +499,7 @@ Respond ONLY with a valid JSON array. Each element:
 - "seniority_ok": boolean
 - "location_ok": boolean
 - "spontaneous_worthy": boolean
+- "deadline": string in YYYY-MM-DD format if an application deadline is mentioned, otherwise ""
 
 Return ONLY the JSON array."""
 
@@ -438,6 +520,7 @@ Return ONLY the JSON array."""
                         "match_highlights": s.get("match_highlights", []),
                         "seniority_ok": s.get("seniority_ok", True),
                         "spontaneous_worthy": s.get("spontaneous_worthy", False),
+                        "deadline": s.get("deadline", ""),
                     })
         except Exception as e:
             print(f"  [Claude error]: {e}")
@@ -469,60 +552,62 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
     all_to_push = [(j, False) for j in jobs if j.get("score", 0) >= MIN_SCORE]
     all_to_push += [(j, True) for j in spontaneous]
 
+    # Reverse so highest scored jobs end up at top of Notion
+    all_to_push = sorted(all_to_push, key=lambda x: x[0].get("score", 0))
+
     pushed = 0
     for job, is_spont in all_to_push:
         highlights = " | ".join(job.get("match_highlights", []))
         job_type = "Spontaneous" if is_spont else "Vacancy"
         score = job.get("score", 0)
 
-        # Map score to Notion select color
-        if score >= 8:
-            score_label = "⭐⭐⭐ Excellent"
-        elif score >= 6:
-            score_label = "⭐⭐ Good"
-        else:
-            score_label = "⭐ Moderate"
+        properties = {
+            "Job Title": {
+                "title": [{"text": {"content": job.get("title", "")}}]
+            },
+            "Company": {
+                "rich_text": [{"text": {"content": job.get("company", "")}}]
+            },
+            "Location": {
+                "rich_text": [{"text": {"content": job.get("location", "")}}]
+            },
+            "Source": {
+                "select": {"name": job.get("source", "Other")}
+            },
+            "Score": {
+                "number": score
+            },
+            "Type": {
+                "select": {"name": job_type}
+            },
+            "URL": {
+                "url": job.get("url", "") or None
+            },
+            "Category": {
+                "select": {"name": job.get("category", "General")}
+            },
+            "Reasoning": {
+                "rich_text": [{"text": {"content": job.get("reasoning", "")[:2000]}}]
+            },
+            "Highlights": {
+                "rich_text": [{"text": {"content": highlights[:2000]}}]
+            },
+            "Date Found": {
+                "date": {"start": datetime.datetime.now().strftime("%Y-%m-%d")}
+            },
+            "Status": {
+                "select": {"name": "New"}
+            },
+        }
+
+        # Add deadline if Claude extracted one
+        deadline = job.get("deadline", "")
+        if deadline:
+            properties["Deadline"] = {"date": {"start": deadline}}
 
         payload = {
             "parent": {"database_id": NOTION_DATABASE_ID},
-            "properties": {
-                "Job Title": {
-                    "title": [{"text": {"content": job.get("title", "")}}]
-                },
-                "Company": {
-                    "rich_text": [{"text": {"content": job.get("company", "")}}]
-                },
-                "Location": {
-                    "rich_text": [{"text": {"content": job.get("location", "")}}]
-                },
-                "Source": {
-                    "select": {"name": job.get("source", "Other")}
-                },
-                "Score": {
-                    "select": {"name": score_label}
-                },
-                "Type": {
-                    "select": {"name": job_type}
-                },
-                "URL": {
-                    "url": job.get("url", "") or None
-                },
-                "Category": {
-                    "select": {"name": job.get("category", "General")}
-                },
-                "Reasoning": {
-                    "rich_text": [{"text": {"content": job.get("reasoning", "")[:2000]}}]
-                },
-                "Highlights": {
-                    "rich_text": [{"text": {"content": highlights[:2000]}}]
-                },
-                "Date Found": {
-                    "date": {"start": datetime.datetime.now().strftime("%Y-%m-%d")}
-                },
-                "Status": {
-                    "select": {"name": "New"}
-                },
-            },
+            "properties": properties,
         }
 
         try:
@@ -534,7 +619,7 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
                 print(f"  [Notion] Failed to push '{job.get('title')}': {resp.text[:200]}")
         except Exception as e:
             print(f"  [Notion error]: {e}")
-        time.sleep(0.4)  # Notion rate limit
+        time.sleep(0.4)
 
     print(f"  [Notion] Pushed {pushed} jobs to your database.")
 
@@ -805,7 +890,27 @@ def run_agent():
     for j in jobs: j["category"] = "General"
     all_jobs.extend(jobs)
     time.sleep(2)
+
+    print(f"[EPSO]")
+    jobs = scrape_epso()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Euraxess]")
+    jobs = scrape_euraxess()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
     all_jobs = deduplicate(all_jobs)
+
+    print(f"\n[Notion] Loading rejected companies...")
+    rejected_companies = get_rejected_companies()
+    if rejected_companies:
+        before = len(all_jobs)
+        all_jobs = [j for j in all_jobs if j.get("company", "").lower().strip() not in rejected_companies]
+        print(f"[Filter] Removed {before - len(all_jobs)} jobs from {len(rejected_companies)} rejected companies")
     print(f"\n[Filter] {len(all_jobs)} unique jobs")
 
     new_jobs = [j for j in all_jobs if j["id"] not in seen]
@@ -821,11 +926,11 @@ def run_agent():
         print("\n[Done] No new jobs this run.")
         return
 
-    print(f"\n[Fetch] Getting descriptions...")
-    for j in new_jobs[:30]:
+    print(f"\n[Fetch] Getting descriptions for {len(new_jobs)} jobs...")
+    for j in new_jobs:
         if not j["description"]:
             j["description"] = fetch_description(j["url"])
-            time.sleep(1)
+            time.sleep(0.8)
 
 # --- AI scoring ---
     print(f"\n[Claude] Scoring {len(new_jobs)} jobs with AI...")
