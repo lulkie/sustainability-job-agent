@@ -107,7 +107,7 @@ def scrape_indeed(query: str) -> list[dict]:
     try:
         url = "https://be.indeed.com/jobs"
         params = {"q": query, "l": "Belgium", "fromage": str(RUN_EVERY_DAYS * 2), "sort": "date"}
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        resp = requests.get(url, headers=HEADERS, timeout=8)
         soup = BeautifulSoup(resp.text, "html.parser")
         cards = soup.select("div.job_seen_beacon, div.jobsearch-SerpJobCard, td.resultContent")
         for card in cards[:20]:
@@ -154,7 +154,7 @@ def scrape_vdab(keyword: str) -> list[dict]:
         else:
             # HTML fallback
             url = f"https://www.vdab.be/vindeenjob/vacatures?trefwoord={requests.utils.quote(keyword)}"
-            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp = requests.get(url, headers=HEADERS, timeout=8)
             soup = BeautifulSoup(resp.text, "html.parser")
             for card in soup.select("article, li.search-result-item")[:20]:
                 title_el = card.select_one("h2, h3, .job-title")
@@ -705,10 +705,6 @@ def run_agent():
                         "climate policy Belgium", "NGO sustainability Belgium",
                         "environmental communications Belgium", "sustainability advocacy Belgium",
                         "corporate social responsibility Belgium"]
-    indeed_queries   = ["sustainability officer Belgium", "ESG reporting Belgium",
-                        "circular economy Belgium", "sustainability communications Belgium",
-                        "environmental policy Belgium", "climate advocacy Belgium",
-                        "NGO environment Belgium"]
     vdab_keywords    = ["duurzaamheid", "ESG", "milieu", "CSRD", "klimaat",
                         "milieubeleid", "duurzame ontwikkeling"]
     jobat_queries    = ["sustainability", "ESG", "duurzaamheid", "milieu adviseur",
@@ -725,13 +721,6 @@ def run_agent():
     for q in linkedin_queries:
         print(f"[LinkedIn] '{q}'")
         jobs = scrape_linkedin(q)
-        for j in jobs: j["category"] = "General"
-        all_jobs.extend(jobs)
-        time.sleep(3)
-
-    for q in indeed_queries:
-        print(f"[Indeed]   '{q}'")
-        jobs = scrape_indeed(q)
         for j in jobs: j["category"] = "General"
         all_jobs.extend(jobs)
         time.sleep(3)
@@ -767,13 +756,6 @@ def run_agent():
     for q in eu_queries:
         print(f"[LinkedIn EU] '{q}'")
         jobs = scrape_linkedin(q)
-        for j in jobs: j["category"] = "EU/Policy"
-        all_jobs.extend(jobs)
-        time.sleep(3)
-
-    for q in eu_queries:
-        print(f"[Indeed EU] '{q}'")
-        jobs = scrape_indeed(q)
         for j in jobs: j["category"] = "EU/Policy"
         all_jobs.extend(jobs)
         time.sleep(3)
