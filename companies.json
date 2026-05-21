@@ -1,69 +1,69 @@
 {
   "meta": {
-    "last_updated": "2026-05-14",
+    "last_updated": "2026-05-21",
     "total_companies": 32,
     "description": "Target companies for direct careers page scraping. Auto-expanded weekly."
   },
   "companies": [
     {
       "name": "Solvay",
-      "careers_url": "https://www.solvay.com/en/careers/job-offers",
+      "careers_url": "https://www.solvay.com/en/career/job-opportunities",
       "sector": "Chemicals",
       "hq": "Brussels, BE",
       "why_relevant": "Major Belgian chemical group with significant CSRD obligations and active ESG transformation programme"
     },
     {
       "name": "Umicore",
-      "careers_url": "https://www.umicore.com/en/careers/job-opportunities/",
+      "careers_url": "https://www.umicore.com/en/careers/job-finder/",
       "sector": "Materials / Circular Economy",
       "hq": "Brussels, BE",
       "why_relevant": "Global leader in circular materials technology — sustainability is core to their business model"
     },
     {
       "name": "Bekaert",
-      "careers_url": "https://www.bekaert.com/en/careers/open-positions",
+      "careers_url": "https://jobs.bekaert.com/viewalljobs/",
       "sector": "Steel / Manufacturing",
       "hq": "Zwevegem, BE",
       "why_relevant": "High-emitting steel wire manufacturer with active decarbonisation roadmap"
     },
     {
       "name": "Colruyt Group",
-      "careers_url": "https://www.colruytgroup.com/en/jobs",
+      "careers_url": "https://jobs.colruytgroup.com/nl/vacatures",
       "sector": "Retail / FMCG",
       "hq": "Halle, BE",
       "why_relevant": "Belgium's largest retailer with ambitious sustainability targets and green energy investments"
     },
     {
       "name": "AB InBev",
-      "careers_url": "https://www.ab-inbev.com/careers/search-jobs/",
+      "careers_url": "https://europecareers.ab-inbev.com/job-indexes",
       "sector": "Food & Beverage",
       "hq": "Leuven, BE",
       "why_relevant": "World's largest brewer headquartered in Leuven — major water and agricultural sustainability commitments"
     },
     {
       "name": "Lotus Bakeries",
-      "careers_url": "https://www.lotusbakeries.com/en/careers",
+      "careers_url": "https://jobs.lotusbakeries.com/",
       "sector": "Food & Beverage",
       "hq": "Lembeke, BE",
       "why_relevant": "Fast-growing Belgian FMCG brand expanding ESG reporting and sustainable sourcing"
     },
     {
       "name": "UCB",
-      "careers_url": "https://www.ucb.com/our-science/careers",
+      "careers_url": "https://careers.ucb.com/global/en/search-results",
       "sector": "Pharma",
       "hq": "Brussels, BE",
       "why_relevant": "Belgian pharma with net-zero commitment and active ESG/CSRD reporting needs"
     },
     {
       "name": "Proximus",
-      "careers_url": "https://www.proximus.com/en/career/job-search.html",
+      "careers_url": "https://jobs.proximus.com/be/en/search-results",
       "sector": "Telecom",
       "hq": "Brussels, BE",
       "why_relevant": "National telco with sustainability strategy and digital-for-climate initiatives"
     },
     {
       "name": "Engie Belgium",
-      "careers_url": "https://www.engie.be/en/jobs/",
+      "careers_url": "https://jobs.engie.com/belgium/",
       "sector": "Energy",
       "hq": "Brussels, BE",
       "why_relevant": "Major energy utility in active transition from nuclear/gas to renewables — high sustainability hiring"
@@ -77,7 +77,7 @@
     },
     {
       "name": "TotalEnergies",
-      "careers_url": "https://jobs.totalenergies.com/global/en",
+      "careers_url": "https://careers.totalenergies.com/en_US/careers/SearchJobs",
       "sector": "Oil & Gas / Renewables",
       "hq": "Paris, FR (strong BE presence)",
       "why_relevant": "Oil major investing heavily in renewables — large sustainability and ESG teams"
@@ -104,22 +104,22 @@
       "why_relevant": "Global FMCG leader with one of the most advanced corporate sustainability frameworks"
     },
     {
-      "name": "Nestlé Belgium",
-      "careers_url": "https://www.nestle.com/jobs",
+      "name": "Nestle Belgium",
+      "careers_url": "https://www.nestle.com/jobs/search-jobs",
       "sector": "Food & Beverage",
       "hq": "Vevey, CH (large BE presence)",
       "why_relevant": "Large food multinational under heavy scrutiny for packaging and water use — active sustainability hiring"
     },
     {
       "name": "Danone",
-      "careers_url": "https://www.danone.com/careers/find-a-job.html",
+      "careers_url": "https://danone.wd3.myworkdayjobs.com/danone_careers",
       "sector": "Food & Beverage",
       "hq": "Paris, FR (BE office)",
       "why_relevant": "B-Corp certified food giant — sustainability embedded across all business units"
     },
     {
       "name": "ArcelorMittal Belgium",
-      "careers_url": "https://careers.arcelormittal.com/",
+      "careers_url": "https://careers.arcelormittal.com/search/?q=&locationsearch=Belgium",
       "sector": "Steel",
       "hq": "Luxembourg (Ghent + Liège sites)",
       "why_relevant": "Largest steel producer in Europe with massive decarbonisation pressure — active green steel transition"
@@ -132,64 +132,64 @@
       "why_relevant": "Large chlor-alkali chemical producer with significant emissions and CSRD reporting obligations"
     },
     {
-      "name": "Brussels Airlines / Lufthansa Group",
-      "careers_url": "https://careers.brusselsairlines.com/",
+      "name": "Brussels Airlines",
+      "careers_url": "https://www.brusselsairlines.com/en-be/misc/jobs.aspx",
       "sector": "Aviation",
       "hq": "Brussels, BE",
       "why_relevant": "Aviation is a high-emitting sector under mounting sustainability pressure — SAF, carbon offsetting roles"
     },
     {
-      "name": "MSC (Mediterranean Shipping)",
-      "careers_url": "https://www.msc.com/en/careers",
+      "name": "MSC Mediterranean Shipping",
+      "careers_url": "https://www.msc.com/en/about-us/careers",
       "sector": "Shipping / Logistics",
       "hq": "Geneva, CH (HQ for BE operations in Antwerp)",
       "why_relevant": "World's largest shipping company based around Antwerp — decarbonising shipping is a key ESG challenge"
     },
     {
-      "name": "DP World / Antwerp Gateway",
-      "careers_url": "https://careers.dpworld.com/",
+      "name": "DP World Antwerp Gateway",
+      "careers_url": "https://careers.dpworld.com/go/All-Jobs/4390901/",
       "sector": "Logistics / Port",
       "hq": "Dubai (major Antwerp terminal)",
       "why_relevant": "Port logistics with significant emissions — sustainability reporting growing under EU port regulations"
     },
     {
-      "name": "Lantmännen Unibake",
-      "careers_url": "https://www.lantmannen.com/en/career/",
+      "name": "Lantmannen Unibake",
+      "careers_url": "https://www.lantmannen.com/en/career/job-openings/",
       "sector": "Food Manufacturing",
       "hq": "Stockholm, SE (large BE bakery operations)",
       "why_relevant": "Large food manufacturer with ambitious farm-to-fork sustainability goals"
     },
     {
       "name": "Philip Morris International",
-      "careers_url": "https://www.pmi.com/careers/overview",
+      "careers_url": "https://www.pmi.com/careers/job-search",
       "sector": "FMCG / Tobacco",
       "hq": "Lausanne, CH (BE manufacturing)",
       "why_relevant": "Tobacco giant in active product transformation — large ESG and smoke-free transition teams"
     },
     {
       "name": "Ahold Delhaize",
-      "careers_url": "https://www.aholddelhaize.com/careers/",
+      "careers_url": "https://www.aholddelhaize.com/careers/jobs/",
       "sector": "Retail / FMCG",
       "hq": "Zaandam, NL (Delhaize BE HQ)",
       "why_relevant": "Major food retail group with active sustainability reporting and packaging/food waste programmes"
     },
     {
       "name": "Decathlon",
-      "careers_url": "https://www.decathlon.com/pages/jobs",
+      "careers_url": "https://www.decathlon.be/nl/content/14-jobs",
       "sector": "Retail / Sporting Goods",
       "hq": "Villeneuve-d'Ascq, FR (large BE presence)",
       "why_relevant": "Fast-growing sports retailer with circular product and eco-design ambitions"
     },
     {
       "name": "Elia Group",
-      "careers_url": "https://www.eliagroup.eu/en/careers",
+      "careers_url": "https://www.eliagroup.eu/en/about-elia-group/careers/job-offers",
       "sector": "Energy / Grid",
       "hq": "Brussels, BE",
       "why_relevant": "Belgian electricity grid operator central to renewable energy integration — key energy transition actor"
     },
     {
       "name": "Renewi",
-      "careers_url": "https://www.renewi.com/en-gb/careers/",
+      "careers_url": "https://www.renewi.com/en-gb/about-renewi/careers/current-vacancies/",
       "sector": "Waste Management / Circular Economy",
       "hq": "Amsterdam, NL (large BE operations)",
       "why_relevant": "Waste-to-product company — circular economy is their core business"
@@ -203,21 +203,21 @@
     },
     {
       "name": "Siemens Belgium",
-      "careers_url": "https://jobs.siemens.com/careers",
+      "careers_url": "https://jobs.siemens.com/careers?search=&location=Belgium",
       "sector": "Industrial / Energy Technology",
       "hq": "Munich, DE (Brussels BE office)",
       "why_relevant": "Industrial conglomerate leading in smart grid, building efficiency and green infrastructure"
     },
     {
       "name": "Schneider Electric",
-      "careers_url": "https://www.se.com/ww/en/about-us/careers/",
+      "careers_url": "https://www.se.com/ww/en/about-us/careers/explore-jobs.jsp",
       "sector": "Energy Management",
       "hq": "Rueil-Malmaison, FR (BE office)",
       "why_relevant": "Global leader in energy management and automation — sustainability is their core product and mission"
     },
     {
       "name": "Veolia Belgium",
-      "careers_url": "https://www.veolia.com/en/veolia-group/human-resources/jobs-and-career",
+      "careers_url": "https://www.veolia.com/en/our-company/careers/job-offers",
       "sector": "Water / Waste / Energy",
       "hq": "Paris, FR (large BE operations)",
       "why_relevant": "Environmental services multinational — water, waste and energy management across Belgium"
