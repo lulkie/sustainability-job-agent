@@ -411,6 +411,101 @@ def scrape_euraxess() -> list[dict]:
     return jobs
 
 
+def scrape_un_careers() -> list[dict]:
+    """Scrape UN Careers portal for sustainability/environment roles."""
+    jobs = []
+    institutions = [
+        ("UNDP", "https://jobs.undp.org/cj_view_jobs.cfm?job_country=Belgium"),
+        ("UNEP", "https://www.unep.org/about-un-environment/employment-opportunities"),
+        ("UNICEF", "https://www.unicef.org/careers/search?location=Belgium"),
+        ("WFP", "https://career5.successfactors.eu/career?company=C0000168410P&site=Belgium"),
+        ("ILO", "https://jobs.ilo.org/job-search-results/?locations=Belgium"),
+        ("UNESCO", "https://careers.unesco.org/go/International-Professional-Posts/3803102/"),
+        ("IOM", "https://careers.iom.int/vacancies?country%5B%5D=BE"),
+        ("UNFPA", "https://www.unfpa.org/jobs"),
+    ]
+    for org_name, url in institutions:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("article, div.job, li.job, tr[class*='job'], div[class*='vacancy'], li[class*='result']")[:15]:
+                title_el = card.select_one("h2, h3, td.title, .job-title, a")
+                link_el = card.select_one("a[href]")
+                title = title_el.get_text(strip=True) if title_el else ""
+                href = link_el["href"] if link_el else url
+                if href and not href.startswith("http"):
+                    href = url.split("/")[0] + "//" + url.split("/")[2] + href
+                if title and href:
+                    jobs.append({"id": href + title, "title": title, "company": org_name,
+                                 "location": "Brussels, Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "UN Careers"})
+        except Exception as e:
+            print(f"  [UN {org_name} error]: {e}")
+        time.sleep(1)
+    # Also search LinkedIn for UN roles
+    un_orgs = ["UNDP", "UNEP", "UNICEF", "WFP", "ILO", "UNESCO", "UN Women",
+               "UNFPA", "UN-Habitat", "IFAD", "UNIDO", "OHCHR", "IOM", "UNU"]
+    try:
+        for org in un_orgs[:6]:  # limit to avoid rate limiting
+            url = "https://www.linkedin.com/jobs/search/"
+            params = {"keywords": f"{org} Belgium sustainability environment", "location": "Belgium", "f_TPR": "r2592000"}
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("div.base-card")[:5]:
+                title_el = card.select_one("h3.base-search-card__title")
+                company_el = card.select_one("h4.base-search-card__subtitle")
+                link_el = card.select_one("a[href*='/jobs/view/']")
+                title = title_el.get_text(strip=True) if title_el else ""
+                company = company_el.get_text(strip=True) if company_el else org
+                href = link_el["href"].split("?")[0] if link_el else ""
+                if title and href:
+                    jobs.append({"id": href + title, "title": title, "company": company,
+                                 "location": "Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "LinkedIn"})
+            time.sleep(2)
+    except Exception as e:
+        print(f"  [UN LinkedIn error]: {e}")
+    print(f"  → {len(jobs)} from UN System")
+    return jobs
+
+
+def scrape_eu_institutions() -> list[dict]:
+    """Scrape EU institution career portals beyond EPSO."""
+    jobs = []
+    portals = [
+        ("European Commission", "https://epso.europa.eu/en/job-opportunities/open-for-application"),
+        ("European Parliament", "https://www.europarl.europa.eu/at-your-service/en/work-with-us/temporary-agents"),
+        ("EEA", "https://www.eea.europa.eu/about-us/jobs"),
+        ("Eurofound", "https://www.eurofound.europa.eu/en/about/careers"),
+        ("EU-OSHA", "https://osha.europa.eu/en/about-eu-osha/jobs-and-trainees"),
+        ("EIGE", "https://eige.europa.eu/about/jobs-and-traineeships"),
+        ("FRA", "https://fra.europa.eu/en/about-fra/jobs"),
+        ("ETF", "https://www.etf.europa.eu/en/about-etf/jobs"),
+        ("CINEA", "https://cinea.ec.europa.eu/about/jobs_en"),
+        ("EESC", "https://www.eesc.europa.eu/en/about/work-us/job-opportunities"),
+    ]
+    for org_name, url in portals:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("article, div.job, li.ecl-content-item, tr[class*='job'], div[class*='vacancy'], li[class*='result']")[:15]:
+                title_el = card.select_one("h2, h3, td.title, .ecl-content-item__title, .job-title, a")
+                link_el = card.select_one("a[href]")
+                title = title_el.get_text(strip=True) if title_el else ""
+                href = link_el["href"] if link_el else url
+                if href and not href.startswith("http"):
+                    href = "https://" + url.split("/")[2] + href
+                if title and href:
+                    jobs.append({"id": href + title, "title": title, "company": org_name,
+                                 "location": "Brussels, Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "EU Institutions"})
+        except Exception as e:
+            print(f"  [EU {org_name} error]: {e}")
+        time.sleep(1)
+    print(f"  → {len(jobs)} from EU Institutions")
+    return jobs
+
+
 def get_rejected_companies() -> set:
     """Read companies marked as rejected in Notion."""
     if not NOTION_API_KEY or not NOTION_DATABASE_ID:
@@ -900,6 +995,18 @@ def run_agent():
     print(f"[Euraxess]")
     jobs = scrape_euraxess()
     for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[EU Institutions]")
+    jobs = scrape_eu_institutions()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[UN System]")
+    jobs = scrape_un_careers()
+    for j in jobs: j["category"] = "UN System"
     all_jobs.extend(jobs)
     time.sleep(2)
 
