@@ -207,7 +207,7 @@ def scrape_stepstone(query: str) -> list[dict]:
     jobs = []
     try:
         url = f"https://www.stepstone.be/jobs/{requests.utils.quote(query)}/in-belgium"
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = requests.get(url, headers=HEADERS, timeout=5)
         soup = BeautifulSoup(resp.text, "html.parser")
         for card in soup.select("article[data-at='job-item'], div.job-ad, li[class*='job']")[:20]:
             title_el = card.select_one("h2, h3, [data-at='job-item-title'], .job-title")
@@ -755,14 +755,40 @@ def scrape_greenjobs() -> list[dict]:
     return jobs
 
 
-def scrape_impactjob() -> list[dict]:
-    """Scrape Impactjob.be for Belgian impact/sustainability jobs."""
+def scrape_impactpool() -> list[dict]:
+    """Scrape Impactpool for Belgium UN/EU/NGO jobs."""
     jobs = []
     try:
-        url = "https://www.impactjob.be/jobs"
+        url = "https://www.impactpool.org/countries/Belgium"
         resp = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
-        for card in soup.select("article, div.job, li.job, div[class*='job']")[:30]:
+        for card in soup.select("div.job, article, li.job-item, div[class*='job'], a[href*='/jobs/']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, .title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.impactpool.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Impactpool"})
+        print(f"  → {len(jobs)} from Impactpool")
+    except Exception as e:
+        print(f"  [Impactpool error]: {e}")
+    return jobs
+
+
+def scrape_beimpact() -> list[dict]:
+    """Scrape BeImpact for Belgian NGO/impact jobs."""
+    jobs = []
+    try:
+        url = "https://www.be-impact.org/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job']")[:30]:
             title_el = card.select_one("h2, h3, .job-title, a")
             company_el = card.select_one(".company, .employer, .organization")
             link_el = card.select_one("a[href]")
@@ -770,14 +796,14 @@ def scrape_impactjob() -> list[dict]:
             company = company_el.get_text(strip=True) if company_el else ""
             href = link_el["href"] if link_el else ""
             if href and not href.startswith("http"):
-                href = "https://www.impactjob.be" + href
+                href = "https://www.be-impact.org" + href
             if title and href:
                 jobs.append({"id": href + title, "title": title, "company": company,
                              "location": "Belgium", "url": href, "description": "",
-                             "date_posted": "", "source": "Impactjob.be"})
-        print(f"  → {len(jobs)} from Impactjob.be")
+                             "date_posted": "", "source": "BeImpact"})
+        print(f"  → {len(jobs)} from BeImpact")
     except Exception as e:
-        print(f"  [Impactjob error]: {e}")
+        print(f"  [BeImpact error]: {e}")
     return jobs
 
 
@@ -968,8 +994,14 @@ def run_agent():
     all_jobs.extend(jobs)
     time.sleep(2)
 
-    print(f"[Impactjob]")
-    jobs = scrape_impactjob()
+    print(f"[Impactpool]")
+    jobs = scrape_impactpool()
+    for j in jobs: j["category"] = "UN System"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[BeImpact]")
+    jobs = scrape_beimpact()
     for j in jobs: j["category"] = "General"
     all_jobs.extend(jobs)
     time.sleep(2)
