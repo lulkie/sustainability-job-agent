@@ -101,6 +101,109 @@ def scrape_linkedin(query: str) -> list[dict]:
         print(f"  [LinkedIn error]: {e}")
     return jobs
 
+def scrape_inclimate() -> list[dict]:
+    """Scrape inClimate for European climate jobs."""
+    jobs = []
+    try:
+        url = "https://inclimate.org/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job'], div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://inclimate.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Europe", "url": href, "description": "",
+                             "date_posted": "", "source": "inClimate"})
+        print(f"  → {len(jobs)} from inClimate")
+    except Exception as e:
+        print(f"  [inClimate error]: {e}")
+    return jobs
+
+
+def scrape_greenjobsnetwork() -> list[dict]:
+    """Scrape Green Jobs Network."""
+    jobs = []
+    try:
+        url = "https://www.greenjobs.com/jobs/?location=Europe"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-listing, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.greenjobs.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Europe", "url": href, "description": "",
+                             "date_posted": "", "source": "Green Jobs Network"})
+        print(f"  → {len(jobs)} from Green Jobs Network")
+    except Exception as e:
+        print(f"  [Green Jobs Network error]: {e}")
+    return jobs
+
+
+def scrape_carbonremovaljobs() -> list[dict]:
+    """Scrape Carbon Removal Jobs."""
+    jobs = []
+    try:
+        url = "https://carbonremoval.jobs/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://carbonremoval.jobs" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Carbon Removal Jobs"})
+        print(f"  → {len(jobs)} from Carbon Removal Jobs")
+    except Exception as e:
+        print(f"  [Carbon Removal Jobs error]: {e}")
+    return jobs
+
+
+def scrape_koolenindustries() -> list[dict]:
+    """Scrape Koolenindustries European cleantech job pool."""
+    jobs = []
+    try:
+        url = "https://koolenindustries.com/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job'], div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://koolenindustries.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Europe", "url": href, "description": "",
+                             "date_posted": "", "source": "Koolenindustries"})
+        print(f"  → {len(jobs)} from Koolenindustries")
+    except Exception as e:
+        print(f"  [Koolenindustries error]: {e}")
+    return jobs
+
 
 def scrape_indeed(query: str) -> list[dict]:
     jobs = []
@@ -1002,6 +1105,30 @@ def run_agent():
 
     print(f"[BeImpact]")
     jobs = scrape_beimpact()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[inClimate]")
+    jobs = scrape_inclimate()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Green Jobs Network]")
+    jobs = scrape_greenjobsnetwork()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Carbon Removal Jobs]")
+    jobs = scrape_carbonremovaljobs()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Koolenindustries]")
+    jobs = scrape_koolenindustries()
     for j in jobs: j["category"] = "General"
     all_jobs.extend(jobs)
     time.sleep(2)
