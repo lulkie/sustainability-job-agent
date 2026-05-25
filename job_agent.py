@@ -670,7 +670,7 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
                 "select": {"name": job.get("source", "Other")}
             },
             "Score": {
-                "number": score
+                "select": {"name": "⭐⭐⭐ Excellent" if score >= 8 else "⭐⭐ Good" if score >= 6 else "⭐ Moderate"}
             },
             "Type": {
                 "select": {"name": job_type}
