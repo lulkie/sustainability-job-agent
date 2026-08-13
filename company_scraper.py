@@ -49,7 +49,41 @@ QUICK_FILTER_KEYWORDS = [
     "carbon", "emission", "green", "renewable", "energy transition",
     "reporting", "impact", "biodiversity", "net zero", "scope",
     "lca", "life cycle", "waste", "water", "supply chain",
+    "intern", "trainee", "stage", "stagiair",
 ]
+
+# ─── Internship detection ────────────────────────────────────────────────────
+# Shared with job_agent.py (imported from there) so every source — scraped
+# job boards and direct company careers pages alike — gets tagged the same way.
+
+_INTERNSHIP_TITLE_RE = re.compile(
+    r"\bintern(?:ship)?\b|\btrainee(?:ship)?\b|\bstagiair\w*\b|\bstagiaire\b|"
+    r"\bstage\b|\bafstudeerstage\b|\bwerkplekleren\b|\bwork\s*placement\b",
+    re.IGNORECASE,
+)
+_INTERNSHIP_DESC_RE = re.compile(
+    r"(?<!not )(?<!not an )(?<!no )(?<!isn't an )"
+    r"\bintern(?:ship)?\b|\btrainee(?:ship)?\b|\bstagiair\w*\b|\bstagiaire\b",
+    re.IGNORECASE,
+)
+
+
+def is_internship(job: dict) -> bool:
+    """Heuristic: does this listing look like an internship/traineeship/stage?
+
+    Checked in order: an explicit flag already set at scrape time (e.g. a
+    search that specifically targeted internships), then the job title
+    (checked against a broader pattern list including the ambiguous "stage"),
+    then the description (checked against a narrower list to avoid false
+    positives from unrelated uses of "stage" like "final stage").
+    """
+    if job.get("is_internship"):
+        return True
+    if _INTERNSHIP_TITLE_RE.search(job.get("title", "") or ""):
+        return True
+    if _INTERNSHIP_DESC_RE.search(job.get("description", "") or ""):
+        return True
+    return False
 
 CANDIDATE_PROFILE = """
 Lucas Switsers de Roeck — sustainability professional based in Leuven, Belgium.
@@ -180,7 +214,7 @@ def scrape_careers_page(company: dict) -> list[dict]:
 
             seen_hrefs.add(href)
 
-            jobs.append({
+            job = {
                 "id": f"{name}::{href or title}",
                 "title": title,
                 "company": name,
@@ -190,7 +224,9 @@ def scrape_careers_page(company: dict) -> list[dict]:
                 "sector": company.get("sector", ""),
                 "source": "Direct (company site)",
                 "date_posted": "",
-            })
+            }
+            job["is_internship"] = is_internship(job)
+            jobs.append(job)
 
     # Deduplicate by title similarity
     unique = {j["title"].lower()[:60]: j for j in jobs}
