@@ -1,488 +1,1586 @@
 """
-company_scraper.py  —  Direct careers-page scraper + weekly auto-discovery
-===========================================================================
-Drop this file into your sustainability_job_agent_v3 folder alongside job_agent.py.
- 
-What it does:
-  1. Loads companies.json and scrapes each company's careers page for open roles
-  2. Scores every matching job with Claude (same logic as job_agent.py)
-  3. Once a week, asks Claude to discover ~10 new companies and appends them to
-     companies.json automatically (fully silent, logged to company_discovery.log)
- 
-Usage (standalone test):
-    python company_scraper.py
- 
-Integrated in job_agent.py — call at the bottom of your main() function:
-    from company_scraper import run_company_scraper, maybe_discover_new_companies
-    company_jobs = run_company_scraper()
-    maybe_discover_new_companies()
-    # Then merge company_jobs into your normal scored_jobs list
- 
-Dependencies (already in your venv):
-    pip install requests beautifulsoup4 anthropic
+Sustainability Job Agent for Lucas Switsers de Roeck
+=====================================================
+Scrapes LinkedIn, Indeed, VDAB, Jobat, Stepstone, Actiris, EU/UN portals,
+dedicated climate/impact job boards, and internship-focused boards
+(Studentjob.be, ErasmusIntern, Idealist, ReliefWeb, Devex) for sustainability
+roles AND internships in Belgium, scores with Claude AI, and pushes results
+to Notion — with internships clearly tagged separately from paid vacancies.
+
+No numpy or jobspy required — works on Python 3.14+
 """
- 
+
 import json
-import time
-import datetime
-import logging
 import os
 import re
-from pathlib import Path
- 
+import time
+import datetime
 import requests
+from pathlib import Path
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 import anthropic
- 
-# ─── Config ──────────────────────────────────────────────────────────────────
- 
-COMPANIES_FILE = Path(__file__).parent / "companies.json"
-DISCOVERY_LOG  = Path(__file__).parent / "company_discovery.log"
-SEEN_JOBS_FILE = Path(__file__).parent / "seen_jobs.json"
- 
+from company_scraper import run_company_scraper, maybe_discover_new_companies, is_internship
+
+load_dotenv()
+
+# ─── Configuration ───────────────────────────────────────────────────────────
+
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
- 
-# Keywords that flag a job as potentially relevant before sending to Claude
-QUICK_FILTER_KEYWORDS = [
-    "sustainab", "esg", "csrd", "climate", "environment", "circular",
-    "carbon", "emission", "green", "renewable", "energy transition",
-    "reporting", "impact", "biodiversity", "net zero", "scope",
-    "lca", "life cycle", "waste", "water", "supply chain",
-    "intern", "trainee", "stage", "stagiair",
-]
- 
-# ─── Internship detection ────────────────────────────────────────────────────
-# Shared with job_agent.py (imported from there) so every source — scraped
-# job boards and direct company careers pages alike — gets tagged the same way.
- 
-_INTERNSHIP_TITLE_RE = re.compile(
-    r"\bintern(?:ship)?\b|\btrainee(?:ship)?\b|\bstagiair\w*\b|\bstagiaire\b|"
-    r"\bstage\b|\bafstudeerstage\b|\bwerkplekleren\b|\bwork\s*placement\b",
-    re.IGNORECASE,
-)
-_INTERNSHIP_DESC_RE = re.compile(
-    r"(?<!not )(?<!not an )(?<!no )(?<!isn't an )"
-    r"\bintern(?:ship)?\b|\btrainee(?:ship)?\b|\bstagiair\w*\b|\bstagiaire\b",
-    re.IGNORECASE,
-)
- 
- 
-def is_internship(job: dict) -> bool:
-    """Heuristic: does this listing look like an internship/traineeship/stage?
- 
-    Checked in order: an explicit flag already set at scrape time (e.g. a
-    search that specifically targeted internships), then the job title
-    (checked against a broader pattern list including the ambiguous "stage"),
-    then the description (checked against a narrower list to avoid false
-    positives from unrelated uses of "stage" like "final stage").
-    """
-    if job.get("is_internship"):
-        return True
-    if _INTERNSHIP_TITLE_RE.search(job.get("title", "") or ""):
-        return True
-    if _INTERNSHIP_DESC_RE.search(job.get("description", "") or ""):
-        return True
-    return False
- 
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
+
+RUN_EVERY_DAYS = 3
+SEEN_JOBS_FILE = Path("seen_jobs.json")
+MIN_SCORE = 6
+# Internship postings tend to have thinner descriptions to score against,
+# so a slightly lower bar keeps genuinely relevant ones from being dropped.
+MIN_SCORE_INTERNSHIP = 5
+
 CANDIDATE_PROFILE = """
-Lucas Switsers de Roeck — sustainability professional based in Leuven, Belgium.
- 
+Name: Lucas Switsers de Roeck
+Location: Leuven, Belgium
+
 Education:
-- MSc Sustainable Development, KU Leuven (2024-2026), major: space & society
-- MSc Environmental Sciences, University of Antwerp (2024-2025), cum laude
-  Thesis: CSRD reporting quality on financial performance
-- MSc Applied Economic Sciences / Marketing, University of Antwerp (2023-2024), cum laude
-  Exchange: Hanken School of Economics, Finland
- 
-Experience:
-- VP I2Impact: led 30-person team, international sustainability projects (Peru, Nicaragua, Benin, Uganda)
-- Project student Humasol: photovoltaic project in Senegal
-- Junior sustainability manager BOMA nv: market analysis, CSRD implementation
-- Sustainability associate, University of Antwerp climate team
- 
-Skills: CSRD reporting, ESG analysis, behavior change communication, sustainability strategy,
-environmental science, marketing, Dutch (native), English (fluent), French (professional)
- 
-Target: Junior/medior sustainability roles in Belgium or remote EU, in ESG, CSRD,
-environmental management, sustainability communications, or energy transition.
+- MSc Sustainable Development, KU Leuven (2024–2026) — major: space & society
+- MSc Environmental Sciences, University of Antwerp (2024–2025) — cum laude; thesis on CSRD reporting quality
+- MSc Applied Economic Sciences (Marketing), University of Antwerp (2023–2024) — cum laude
+
+Work experience (~1 year total):
+- Vice-President, I2Impact (2025–2026): led 30-student team, sustainability events, international projects
+- Project Student Senegal, Humasol (2025–2026): photovoltaic construction research
+- Junior Sustainability Manager, BOMA nv (2024): CSRD implementation, sustainability analysis
+- Sustainability Associate, University of Antwerp Climate Team (2023–2024)
+
+Key skills: CSRD, ESG, sustainability consulting, environmental science, marketing, behavior change
+Languages: Dutch (native), English (fluent), French (professional)
+Seniority target: junior to medior only (max ~3–4 years experience required)
+Geography: Belgium only
 """
- 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
- 
-def load_companies() -> list[dict]:
-    if not COMPANIES_FILE.exists():
-        print(f"[company_scraper] companies.json not found at {COMPANIES_FILE}")
-        return []
-    with open(COMPANIES_FILE) as f:
-        data = json.load(f)
-    return data.get("companies", [])
- 
- 
-def save_companies(companies: list[dict]):
-    existing = {}
-    if COMPANIES_FILE.exists():
-        with open(COMPANIES_FILE) as f:
-            existing = json.load(f)
-    existing["companies"] = companies
-    existing["meta"]["total_companies"] = len(companies)
-    existing["meta"]["last_updated"] = datetime.date.today().isoformat()
-    with open(COMPANIES_FILE, "w") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
- 
- 
-def load_seen_jobs() -> set:
-    if SEEN_JOBS_FILE.exists():
-        with open(SEEN_JOBS_FILE) as f:
-            return set(json.load(f))
-    return set()
- 
- 
-def save_seen_jobs(seen: set):
-    with open(SEEN_JOBS_FILE, "w") as f:
-        json.dump(list(seen), f)
- 
- 
-def quick_match(text: str) -> bool:
-    """Fast keyword pre-filter before calling Claude."""
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in QUICK_FILTER_KEYWORDS)
- 
- 
-# ─── Step 1: Scrape a single careers page ────────────────────────────────────
- 
-def scrape_careers_page(company: dict) -> list[dict]:
+
+SENIOR_BLOCKLIST = [
+    "director", "head of", "chief", "vice president",
+    "senior manager", "principal", "10 years", "10+ years",
+    "+10 jaar", "+15 jaar", "15 years",
+]
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# ─── Scrapers ─────────────────────────────────────────────────────────────────
+
+def scrape_linkedin(query: str, internship: bool = False) -> list[dict]:
+    """Scrape LinkedIn job search.
+
+    LinkedIn's own experience-level filter (f_E) distinguishes internships
+    (1) from entry-level (2). When internship=True we search that filter
+    specifically and tag every result as an internship at the source,
+    rather than relying only on keyword guessing afterwards.
     """
-    Fetch the company's careers page and extract job listings.
-    Returns a list of raw job dicts (not yet scored).
-    """
-    url = company["careers_url"]
-    name = company["name"]
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-GB,en;q=0.9",
-    }
- 
-    try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"  [{name}] Fetch error: {e}")
-        return []
- 
-    soup = BeautifulSoup(resp.text, "html.parser")
- 
-    # Remove nav, footer, scripts to reduce noise
-    for tag in soup(["nav", "footer", "script", "style", "header"]):
-        tag.decompose()
- 
     jobs = []
- 
-    # Strategy 1: look for common job-listing patterns
-    job_selectors = [
-        "a[href*='job']", "a[href*='career']", "a[href*='vacancy']",
-        "a[href*='vacature']", "a[href*='position']", "a[href*='opening']",
-        "li.job", "div.job", "article.job", "div.vacancy",
-        "tr.job-row", "[class*='job-item']", "[class*='job-card']",
-        "[class*='vacancy']", "[class*='position-item']",
-    ]
- 
-    seen_hrefs = set()
-    for selector in job_selectors:
-        for el in soup.select(selector)[:50]:
-            title = el.get_text(separator=" ", strip=True)[:120]
-            href = el.get("href", "") if el.name == "a" else ""
-            if el.name != "a":
-                link = el.find("a", href=True)
-                href = link["href"] if link else ""
-                if not title and link:
-                    title = link.get_text(strip=True)[:120]
- 
-            if not title or len(title) < 5:
-                continue
-            if href in seen_hrefs:
-                continue
- 
-            # Make absolute URL
+    try:
+        url = "https://www.linkedin.com/jobs/search/"
+        params = {
+            "keywords": query,
+            "location": "Belgium",
+            "f_TPR": "r604800",
+            "f_E": "1" if internship else "1,2",
+            "start": 0,
+        }
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("div.job-search-card, li.jobs-search-results__list-item, div.base-card")
+        for card in cards[:20]:
+            title_el = card.select_one("h3.base-search-card__title, h3, .job-title")
+            company_el = card.select_one("h4.base-search-card__subtitle, h4, .job-listing-company-name")
+            location_el = card.select_one("span.job-search-card__location")
+            link_el = card.select_one("a[href*='/jobs/view/'], a[href*='linkedin.com/jobs']")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Belgium"
+            link = link_el["href"].split("?")[0] if link_el else ""
+            if title and link:
+                jobs.append({"id": link + title, "title": title, "company": company,
+                             "location": location, "url": link, "description": "",
+                             "date_posted": "", "source": "LinkedIn",
+                             "is_internship": internship})
+        print(f"  → {len(jobs)} from LinkedIn" + (" (internship)" if internship else ""))
+    except Exception as e:
+        print(f"  [LinkedIn error]: {e}")
+    return jobs
+
+def scrape_inclimate() -> list[dict]:
+    """Scrape inClimate for European climate jobs."""
+    jobs = []
+    try:
+        url = "https://inclimate.org/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job'], div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
             if href and not href.startswith("http"):
-                from urllib.parse import urljoin
-                href = urljoin(url, href)
- 
-            seen_hrefs.add(href)
- 
-            job = {
-                "id": f"{name}::{href or title}",
-                "title": title,
-                "company": name,
-                "location": company.get("hq", ""),
-                "url": href or url,
-                "description": company.get("why_relevant", ""),
-                "sector": company.get("sector", ""),
-                "source": "Direct (company site)",
-                "date_posted": "",
-            }
-            job["is_internship"] = is_internship(job)
-            jobs.append(job)
- 
-    # Deduplicate by title similarity
-    unique = {j["title"].lower()[:60]: j for j in jobs}
-    result = list(unique.values())
- 
-    print(f"  [{name}] Found {len(result)} candidate listings on careers page")
-    return result
- 
- 
-# ─── Step 2: Score jobs with Claude ──────────────────────────────────────────
- 
-def score_jobs_with_claude(jobs: list[dict]) -> list[dict]:
-    """
-    Filter by keyword first, then score remaining jobs with Claude.
-    Returns only jobs with score >= 6.
-    """
-    if not client:
-        print("  [Claude] No API key — returning keyword-filtered jobs unscored")
-        return [j for j in jobs if quick_match(j["title"] + " " + j.get("description", ""))]
- 
-    # Pre-filter with keywords to avoid unnecessary API calls
-    candidates = [j for j in jobs if quick_match(j["title"] + " " + j.get("description", ""))]
-    print(f"  [Claude] {len(candidates)} jobs passed keyword filter, scoring with Claude...")
- 
-    if not candidates:
-        return []
- 
-    # Batch into groups of 10 to keep prompt size manageable
-    scored = []
-    for i in range(0, len(candidates), 10):
-        batch = candidates[i:i+10]
-        job_list = "\n".join(
-            f"{idx+1}. [{j['company']}] {j['title']} | {j.get('sector','')}"
-            for idx, j in enumerate(batch)
-        )
- 
-        prompt = f"""You are a job-fit scorer for a sustainability professional.
- 
-Candidate profile:
-{CANDIDATE_PROFILE}
- 
-Score each job from 1–10 for fit. Return ONLY a JSON array like:
-[{{"index": 1, "score": 8, "reason": "short reason"}}, ...]
- 
-Jobs to score:
-{job_list}
- 
-Rules:
-- Score 8–10: strong match (sustainability/ESG/CSRD/environment role, entry or junior level)
-- Score 6–7: partial match (adjacent role where sustainability background adds value)  
-- Score 1–5: poor match (unrelated, senior-only, or purely technical/IT)
-- Only return the JSON array, no other text."""
- 
+                href = "https://inclimate.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Europe", "url": href, "description": "",
+                             "date_posted": "", "source": "inClimate"})
+        print(f"  → {len(jobs)} from inClimate")
+    except Exception as e:
+        print(f"  [inClimate error]: {e}")
+    return jobs
+
+
+def scrape_greenjobsnetwork() -> list[dict]:
+    """Scrape Green Jobs Network."""
+    jobs = []
+    try:
+        url = "https://www.greenjobs.com/jobs/?location=Europe"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-listing, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.greenjobs.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Europe", "url": href, "description": "",
+                             "date_posted": "", "source": "Green Jobs Network"})
+        print(f"  → {len(jobs)} from Green Jobs Network")
+    except Exception as e:
+        print(f"  [Green Jobs Network error]: {e}")
+    return jobs
+
+
+def scrape_carbonremovaljobs() -> list[dict]:
+    """Scrape Carbon Removal Jobs."""
+    jobs = []
+    try:
+        url = "https://carbonremoval.jobs/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://carbonremoval.jobs" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Carbon Removal Jobs"})
+        print(f"  → {len(jobs)} from Carbon Removal Jobs")
+    except Exception as e:
+        print(f"  [Carbon Removal Jobs error]: {e}")
+    return jobs
+
+
+def scrape_koolenindustries() -> list[dict]:
+    """Scrape Koolenindustries European cleantech job pool."""
+    jobs = []
+    try:
+        url = "https://koolenindustries.com/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job'], div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://koolenindustries.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Europe", "url": href, "description": "",
+                             "date_posted": "", "source": "Koolenindustries"})
+        print(f"  → {len(jobs)} from Koolenindustries")
+    except Exception as e:
+        print(f"  [Koolenindustries error]: {e}")
+    return jobs
+
+
+def scrape_indeed(query: str, internship: bool = False) -> list[dict]:
+    jobs = []
+    try:
+        url = "https://be.indeed.com/jobs"
+        params = {"q": query, "l": "Belgium", "fromage": str(RUN_EVERY_DAYS * 2), "sort": "date"}
+        if internship:
+            params["jt"] = "internship"
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=8)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("div.job_seen_beacon, div.jobsearch-SerpJobCard, td.resultContent")
+        for card in cards[:20]:
+            title_el = card.select_one("h2.jobTitle span, h2 a span, .jobTitle")
+            company_el = card.select_one("span.companyName, [data-testid='company-name']")
+            location_el = card.select_one("div.companyLocation, [data-testid='text-location']")
+            link_el = card.select_one("a[href*='/rc/clk'], h2 a")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Belgium"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://be.indeed.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": location, "url": href, "description": "",
+                             "date_posted": "", "source": "Indeed",
+                             "is_internship": internship})
+        print(f"  → {len(jobs)} from Indeed" + (" (internship)" if internship else ""))
+    except Exception as e:
+        print(f"  [Indeed error]: {e}")
+    return jobs
+
+
+def scrape_vdab(keyword: str, internship: bool = False) -> list[dict]:
+    jobs = []
+    try:
+        api_url = "https://www.vdab.be/vindeenjob/api/jobs"
+        params = {"trefwoord": keyword, "sort": "publicatieDatum", "pagina": 1, "aantalPerPagina": 25}
+        resp = requests.get(api_url, params=params, headers=HEADERS, timeout=15)
+        if resp.status_code == 200 and "application/json" in resp.headers.get("Content-Type", ""):
+            data = resp.json()
+            for j in data.get("vacatures", []):
+                title = j.get("functiebenaming", "")
+                company = j.get("bedrijfsnaam", "")
+                city = j.get("gemeente", "")
+                url = j.get("vacatureUrl", "")
+                if url and not url.startswith("http"):
+                    url = "https://www.vdab.be" + url
+                if title:
+                    jobs.append({"id": url + title, "title": title, "company": company,
+                                 "location": f"{city}, Belgium", "url": url,
+                                 "description": j.get("omschrijving", "")[:2000],
+                                 "date_posted": j.get("publicatieDatum", ""), "source": "VDAB",
+                                 "is_internship": internship})
+        else:
+            # HTML fallback
+            url = f"https://www.vdab.be/vindeenjob/vacatures?trefwoord={requests.utils.quote(keyword)}"
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("article, li.search-result-item")[:20]:
+                title_el = card.select_one("h2, h3, .job-title")
+                company_el = card.select_one(".company-name, .bedrijfsnaam")
+                link_el = card.select_one("a[href]")
+                title = title_el.get_text(strip=True) if title_el else ""
+                company = company_el.get_text(strip=True) if company_el else ""
+                href = link_el["href"] if link_el else ""
+                if href and not href.startswith("http"):
+                    href = "https://www.vdab.be" + href
+                if title:
+                    jobs.append({"id": href + title, "title": title, "company": company,
+                                 "location": "Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "VDAB",
+                                 "is_internship": internship})
+        print(f"  → {len(jobs)} from VDAB" + (" (internship)" if internship else ""))
+    except Exception as e:
+        print(f"  [VDAB error]: {e}")
+    return jobs
+
+
+def scrape_jobat(query: str, internship: bool = False) -> list[dict]:
+    """Scrape Jobat.be — biggest Belgian job board."""
+    jobs = []
+    try:
+        url = "https://www.jobat.be/en/jobs"
+        params = {"q": query, "r": "BE", "sort": "date"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article.job, div.job-card, li.job-item, div[class*='vacancy']")[:20]:
+            title_el = card.select_one("h2, h3, .job-title, [class*='title']")
+            company_el = card.select_one(".company, .employer, [class*='company']")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.jobat.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Jobat",
+                             "is_internship": internship})
+        print(f"  → {len(jobs)} from Jobat" + (" (internship)" if internship else ""))
+    except Exception as e:
+        print(f"  [Jobat error]: {e}")
+    return jobs
+
+
+def scrape_stepstone(query: str, internship: bool = False) -> list[dict]:
+    """Scrape Stepstone.be."""
+    jobs = []
+    try:
+        url = f"https://www.stepstone.be/jobs/{requests.utils.quote(query)}/in-belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=5)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article[data-at='job-item'], div.job-ad, li[class*='job']")[:20]:
+            title_el = card.select_one("h2, h3, [data-at='job-item-title'], .job-title")
+            company_el = card.select_one("[data-at='job-item-company-name'], .company-name")
+            location_el = card.select_one("[data-at='job-item-location'], .location")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Belgium"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.stepstone.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": location, "url": href, "description": "",
+                             "date_posted": "", "source": "Stepstone",
+                             "is_internship": internship})
+        print(f"  → {len(jobs)} from Stepstone" + (" (internship)" if internship else ""))
+    except Exception as e:
+        print(f"  [Stepstone error]: {e}")
+    return jobs
+
+
+def scrape_euroclimatejobs() -> list[dict]:
+    """Scrape EuroClimateJobs for Belgium."""
+    jobs = []
+    try:
+        url = "https://www.euroclimatejobs.com/jobs/belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article.job, li.job-listing, tr.job-row")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a[href*='job']")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.euroclimatejobs.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "EuroClimateJobs"})
+        print(f"  → {len(jobs)} from EuroClimateJobs")
+    except Exception as e:
+        print(f"  [EuroClimateJobs error]: {e}")
+    return jobs
+
+
+def scrape_eurobrussels() -> list[dict]:
+    """Scrape EuroBrussels for environment/sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.eurobrussels.com/jobs/environment"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a.job-link")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.eurobrussels.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "EuroBrussels"})
+        print(f"  → {len(jobs)} from EuroBrussels")
+    except Exception as e:
+        print(f"  [EuroBrussels error]: {e}")
+    return jobs
+
+
+def scrape_brussels_sustainability_club() -> list[dict]:
+    """Scrape Brussels Sustainability Club job board."""
+    jobs = []
+    try:
+        url = "https://brusselssustainabilityclub.com/jobs/"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Brussels Sustainability Club"})
+        print(f"  → {len(jobs)} from Brussels Sustainability Club")
+    except Exception as e:
+        print(f"  [Brussels Sustainability Club error]: {e}")
+    return jobs
+
+
+def scrape_actiris(keyword: str, internship: bool = False) -> list[dict]:
+    """Scrape Actiris — Brussels regional employment service."""
+    jobs = []
+    try:
+        url = "https://www.actiris.brussels/en/citizens/find-a-job/"
+        params = {"q": keyword}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.vacancy, div[class*='offer']")[:20]:
+            title_el = card.select_one("h2, h3, .job-title, .offer-title")
+            company_el = card.select_one(".company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.actiris.brussels" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Actiris",
+                             "is_internship": internship})
+        print(f"  → {len(jobs)} from Actiris" + (" (internship)" if internship else ""))
+    except Exception as e:
+        print(f"  [Actiris error]: {e}")
+    return jobs
+
+
+def scrape_glassdoor(query: str) -> list[dict]:
+    """Scrape Glassdoor for Belgium sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.glassdoor.com/Job/belgium-sustainability-jobs-SRCH_IL.0,7_IN25_KO8,22.htm"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("li[data-test='jobListing'], div.jobCard, article.job")[:20]:
+            title_el = card.select_one("[data-test='job-title'], .job-title, h2, h3")
+            company_el = card.select_one("[data-test='employer-name'], .employer-name, .company")
+            location_el = card.select_one("[data-test='emp-location'], .location")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Belgium"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.glassdoor.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": location, "url": href, "description": "",
+                             "date_posted": "", "source": "Glassdoor"})
+        print(f"  → {len(jobs)} from Glassdoor")
+    except Exception as e:
+        print(f"  [Glassdoor error]: {e}")
+    return jobs
+
+
+def scrape_epso() -> list[dict]:
+    """Scrape EPSO — EU institutions official job board."""
+    jobs = []
+    try:
+        url = "https://epso.europa.eu/en/job-opportunities/open-for-application"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.ecl-content-item, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .ecl-content-item__title, a")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://epso.europa.eu" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": "EU Institution",
+                             "location": "Brussels, Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "EPSO"})
+        print(f"  → {len(jobs)} from EPSO")
+    except Exception as e:
+        print(f"  [EPSO error]: {e}")
+    return jobs
+
+
+def scrape_euraxess() -> list[dict]:
+    """Scrape Euraxess — EU research and policy jobs."""
+    jobs = []
+    try:
+        url = "https://euraxess.ec.europa.eu/jobs/search?f[0]=field_job_country:Belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.views-row, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .field-title, a")
+            company_el = card.select_one(".field-organisation, .company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else "EU/Research"
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://euraxess.ec.europa.eu" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Euraxess"})
+        print(f"  → {len(jobs)} from Euraxess")
+    except Exception as e:
+        print(f"  [Euraxess error]: {e}")
+    return jobs
+
+
+def scrape_un_careers() -> list[dict]:
+    """Scrape UN Careers portal for sustainability/environment roles."""
+    jobs = []
+    institutions = [
+        ("UNDP", "https://jobs.undp.org/cj_view_jobs.cfm?job_country=Belgium"),
+        ("UNEP", "https://www.unep.org/about-un-environment/employment-opportunities"),
+        ("UNICEF", "https://www.unicef.org/careers/search?location=Belgium"),
+        ("WFP", "https://career5.successfactors.eu/career?company=C0000168410P&site=Belgium"),
+        ("ILO", "https://jobs.ilo.org/job-search-results/?locations=Belgium"),
+        ("UNESCO", "https://careers.unesco.org/go/International-Professional-Posts/3803102/"),
+        ("IOM", "https://careers.iom.int/vacancies?country%5B%5D=BE"),
+        ("UNFPA", "https://www.unfpa.org/jobs"),
+    ]
+    for org_name, url in institutions:
         try:
-            resp = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=800,
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("article, div.job, li.job, tr[class*='job'], div[class*='vacancy'], li[class*='result']")[:15]:
+                title_el = card.select_one("h2, h3, td.title, .job-title, a")
+                link_el = card.select_one("a[href]")
+                title = title_el.get_text(strip=True) if title_el else ""
+                href = link_el["href"] if link_el else url
+                if href and not href.startswith("http"):
+                    href = url.split("/")[0] + "//" + url.split("/")[2] + href
+                if title and href:
+                    jobs.append({"id": href + title, "title": title, "company": org_name,
+                                 "location": "Brussels, Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "UN Careers"})
+        except Exception as e:
+            print(f"  [UN {org_name} error]: {e}")
+        time.sleep(1)
+    # Also search LinkedIn for UN roles
+    un_orgs = ["UNDP", "UNEP", "UNICEF", "WFP", "ILO", "UNESCO", "UN Women",
+               "UNFPA", "UN-Habitat", "IFAD", "UNIDO", "OHCHR", "IOM", "UNU"]
+    try:
+        for org in un_orgs[:6]:  # limit to avoid rate limiting
+            url = "https://www.linkedin.com/jobs/search/"
+            params = {"keywords": f"{org} Belgium sustainability environment", "location": "Belgium", "f_TPR": "r2592000"}
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("div.base-card")[:5]:
+                title_el = card.select_one("h3.base-search-card__title")
+                company_el = card.select_one("h4.base-search-card__subtitle")
+                link_el = card.select_one("a[href*='/jobs/view/']")
+                title = title_el.get_text(strip=True) if title_el else ""
+                company = company_el.get_text(strip=True) if company_el else org
+                href = link_el["href"].split("?")[0] if link_el else ""
+                if title and href:
+                    jobs.append({"id": href + title, "title": title, "company": company,
+                                 "location": "Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "LinkedIn"})
+            time.sleep(2)
+    except Exception as e:
+        print(f"  [UN LinkedIn error]: {e}")
+    print(f"  → {len(jobs)} from UN System")
+    return jobs
+
+
+def scrape_eu_institutions() -> list[dict]:
+    """Scrape EU institution career portals beyond EPSO."""
+    jobs = []
+    portals = [
+        ("European Commission", "https://epso.europa.eu/en/job-opportunities/open-for-application"),
+        ("European Parliament", "https://www.europarl.europa.eu/at-your-service/en/work-with-us/temporary-agents"),
+        ("EEA", "https://www.eea.europa.eu/about-us/jobs"),
+        ("Eurofound", "https://www.eurofound.europa.eu/en/about/careers"),
+        ("EU-OSHA", "https://osha.europa.eu/en/about-eu-osha/jobs-and-trainees"),
+        ("EIGE", "https://eige.europa.eu/about/jobs-and-traineeships"),
+        ("FRA", "https://fra.europa.eu/en/about-fra/jobs"),
+        ("ETF", "https://www.etf.europa.eu/en/about-etf/jobs"),
+        ("CINEA", "https://cinea.ec.europa.eu/about/jobs_en"),
+        ("EESC", "https://www.eesc.europa.eu/en/about/work-us/job-opportunities"),
+    ]
+    for org_name, url in portals:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for card in soup.select("article, div.job, li.ecl-content-item, tr[class*='job'], div[class*='vacancy'], li[class*='result']")[:15]:
+                title_el = card.select_one("h2, h3, td.title, .ecl-content-item__title, .job-title, a")
+                link_el = card.select_one("a[href]")
+                title = title_el.get_text(strip=True) if title_el else ""
+                href = link_el["href"] if link_el else url
+                if href and not href.startswith("http"):
+                    href = "https://" + url.split("/")[2] + href
+                if title and href:
+                    jobs.append({"id": href + title, "title": title, "company": org_name,
+                                 "location": "Brussels, Belgium", "url": href, "description": "",
+                                 "date_posted": "", "source": "EU Institutions"})
+        except Exception as e:
+            print(f"  [EU {org_name} error]: {e}")
+        time.sleep(1)
+    print(f"  → {len(jobs)} from EU Institutions")
+    return jobs
+
+
+def get_rejected_companies() -> set:
+    """Read companies marked as rejected in Notion."""
+    if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+        return set()
+    rejected = set()
+    try:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+        headers = {
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "filter": {
+                "property": "Reject Company",
+                "checkbox": {"equals": True}
+            },
+            "page_size": 100,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        data = resp.json()
+        for page in data.get("results", []):
+            company_prop = page.get("properties", {}).get("Company", {})
+            rich_text = company_prop.get("rich_text", [])
+            if rich_text:
+                rejected.add(rich_text[0]["text"]["content"].lower().strip())
+    except Exception as e:
+        print(f"  [Notion] Could not fetch rejected companies: {e}")
+    return rejected
+
+
+def fetch_description(url: str) -> str:
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for selector in ["div.description__text", "div.jobsearch-jobDescriptionText",
+                         "div#jobDescriptionText", "div.job-description"]:
+            el = soup.select_one(selector)
+            if el:
+                return el.get_text(separator=" ", strip=True)[:2000]
+        main = soup.select_one("main, article")
+        if main:
+            return main.get_text(separator=" ", strip=True)[:2000]
+    except Exception:
+        pass
+    return ""
+
+
+# ─── AI Scoring ───────────────────────────────────────────────────────────────
+
+def score_jobs_with_claude(jobs: list[dict]) -> list[dict]:
+    if not ANTHROPIC_API_KEY:
+        print("  [Warning] No ANTHROPIC_API_KEY — skipping AI scoring.")
+        for j in jobs:
+            j.update({"score": 7, "reasoning": "AI scoring skipped", "match_highlights": [],
+                      "seniority_ok": True, "spontaneous_worthy": False})
+        return jobs
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    scored = []
+    for i in range(0, len(jobs), 5):
+        batch = jobs[i:i + 5]
+        job_list_text = ""
+        for idx, j in enumerate(batch):
+            job_list_text += f"""
+---
+JOB {idx + 1}:
+Title: {j['title']}
+Company: {j['company']}
+Location: {j['location']}
+Likely type so far: {"Internship/traineeship" if j.get('is_internship') else "Unknown — please judge from title/description"}
+Description: {j['description'][:600] or '(none)'}
+"""
+        prompt = f"""You are a career advisor helping a sustainability candidate find jobs AND internships in Belgium.
+
+CANDIDATE PROFILE:
+{CANDIDATE_PROFILE}
+
+JOBS TO EVALUATE:
+{job_list_text}
+
+Respond ONLY with a valid JSON array. Each element:
+- "job_index": integer (1-based)
+- "score": integer 1-10 (score internships on relevance/fit the same way you would a job — do not penalize just for being an internship)
+- "reasoning": string (2-3 sentences)
+- "match_highlights": list of up to 3 short strings
+- "seniority_ok": boolean
+- "location_ok": boolean
+- "spontaneous_worthy": boolean
+- "is_internship": boolean — true if this posting is an internship, traineeship, "stage", or similar unpaid/training placement rather than a regular paid position
+- "deadline": string in YYYY-MM-DD format if an application deadline is mentioned, otherwise ""
+
+Return ONLY the JSON array."""
+
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw = resp.content[0].text.strip()
-            # Strip markdown fences if present
-            raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
-            scores = json.loads(raw)
- 
-            for item in scores:
-                idx = item["index"] - 1
-                if 0 <= idx < len(batch) and item["score"] >= 6:
-                    job = batch[idx].copy()
-                    job["score"] = item["score"]
-                    job["score_reason"] = item.get("reason", "")
-                    scored.append(job)
- 
+            raw = response.content[0].text.strip()
+            raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
+            for s in json.loads(raw):
+                idx = s["job_index"] - 1
+                if 0 <= idx < len(batch):
+                    batch[idx].update({
+                        "score": s.get("score", 5),
+                        "reasoning": s.get("reasoning", ""),
+                        "match_highlights": s.get("match_highlights", []),
+                        "seniority_ok": s.get("seniority_ok", True),
+                        "spontaneous_worthy": s.get("spontaneous_worthy", False),
+                        "deadline": s.get("deadline", ""),
+                    })
+                    batch[idx]["is_internship"] = bool(batch[idx].get("is_internship")) or bool(s.get("is_internship", False))
         except Exception as e:
-            print(f"  [Claude] Scoring error: {e} — keeping keyword-matched jobs")
-            scored.extend(batch)
- 
-        time.sleep(0.5)  # be polite to the API
- 
+            print(f"  [Claude error]: {e}")
+            for j in batch:
+                j.setdefault("score", 5)
+                j.setdefault("reasoning", "Scoring failed")
+                j.setdefault("match_highlights", [])
+                j.setdefault("seniority_ok", True)
+                j.setdefault("spontaneous_worthy", False)
+        scored.extend(batch)
+        time.sleep(1)
     return scored
- 
- 
-# ─── Step 3: Run full company scraper ────────────────────────────────────────
- 
-def run_company_scraper() -> list[dict]:
-    """
-    Main entry point. Scrapes all companies in companies.json,
-    scores matches, filters out seen jobs.
-    Returns list of new scored jobs.
-    """
-    companies = load_companies()
+
+
+# ─── Notion Integration ───────────────────────────────────────────────────────
+
+def ensure_notion_schema() -> bool:
+    """Make sure the Notion database has an 'Employment Type' select property
+    (Paid Job / Internship) so internships can be visually distinguished.
+    Idempotent — safe to call on every run. Returns True only if the
+    property is confirmed to exist (already there, or just added), so
+    callers can skip setting it otherwise — sending an unknown property
+    to Notion would fail EVERY page in the batch, not just this one.
+    If the integration doesn't have permission to alter the schema, this
+    just logs and moves on; the title-prefix still makes internships obvious."""
+    if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+        return False
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+    try:
+        resp = requests.get(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
+                             headers=headers, timeout=15)
+        resp.raise_for_status()
+        existing_props = resp.json().get("properties", {})
+        if "Employment Type" in existing_props:
+            return True
+        patch = {
+            "properties": {
+                "Employment Type": {
+                    "select": {
+                        "options": [
+                            {"name": "💼 Paid Job", "color": "green"},
+                            {"name": "🎓 Internship", "color": "purple"},
+                        ]
+                    }
+                }
+            }
+        }
+        patch_resp = requests.patch(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
+                                     headers=headers, json=patch, timeout=15)
+        if patch_resp.status_code == 200:
+            print("  [Notion] Added 'Employment Type' property to database schema.")
+            return True
+        print(f"  [Notion] Could not add 'Employment Type' property automatically "
+              f"(add a Select property named 'Employment Type' manually if you want it): "
+              f"{patch_resp.text[:200]}")
+        return False
+    except Exception as e:
+        print(f"  [Notion] Could not verify/update database schema: {e}")
+        return False
+
+
+def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
+    """Push scored jobs to a Notion database."""
+    if not NOTION_API_KEY or not NOTION_DATABASE_ID:
+        print("  [Notion] No credentials set — skipping Notion push.")
+        return
+
+    employment_type_available = ensure_notion_schema()
+
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    def _threshold(j: dict) -> int:
+        return MIN_SCORE_INTERNSHIP if j.get("is_internship") else MIN_SCORE
+
+    all_to_push = [(j, False) for j in jobs if j.get("score", 0) >= _threshold(j)]
+    all_to_push += [(j, True) for j in spontaneous]
+
+    # Reverse so highest scored jobs end up at top of Notion
+    all_to_push = sorted(all_to_push, key=lambda x: x[0].get("score", 0))
+
+    pushed = 0
+    for job, is_spont in all_to_push:
+        highlights = " | ".join(job.get("match_highlights", []))
+        job_type = "Spontaneous" if is_spont else "Vacancy"
+        score = job.get("score", 0)
+        is_intern = bool(job.get("is_internship"))
+
+        # Prefix the title itself so internships are unmistakable even in
+        # views/filters that don't show the Employment Type column.
+        title_text = job.get("title", "")
+        if is_intern:
+            title_text = f"🎓 [INTERNSHIP] {title_text}"
+
+        properties = {
+            "Job Title": {
+                "title": [{"text": {"content": title_text}}]
+            },
+            "Company": {
+                "rich_text": [{"text": {"content": job.get("company", "")}}]
+            },
+            "Location": {
+                "rich_text": [{"text": {"content": job.get("location", "")}}]
+            },
+            "Source": {
+                "select": {"name": job.get("source", "Other")}
+            },
+            "Score": {
+                "select": {"name": "⭐⭐⭐ Excellent" if score >= 8 else "⭐⭐ Good" if score >= 6 else "⭐ Moderate"}
+            },
+            "Type": {
+                "select": {"name": job_type}
+            },
+            "URL": {
+                "url": job.get("url", "") or None
+            },
+            "Category": {
+                "select": {"name": job.get("category", "General")}
+            },
+            "Reasoning": {
+                "rich_text": [{"text": {"content": job.get("reasoning", "")[:2000]}}]
+            },
+            "Highlights": {
+                "rich_text": [{"text": {"content": highlights[:2000]}}]
+            },
+            "Date Found": {
+                "date": {"start": datetime.datetime.now().strftime("%Y-%m-%d")}
+            },
+            "Status": {
+                "select": {"name": "New"}
+            },
+        }
+
+        if employment_type_available:
+            properties["Employment Type"] = {
+                "select": {"name": "🎓 Internship" if is_intern else "💼 Paid Job"}
+            }
+
+        # Add deadline if Claude extracted one
+        deadline = job.get("deadline", "")
+        if deadline:
+            properties["Deadline"] = {"date": {"start": deadline}}
+
+        payload = {
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": properties,
+        }
+
+        try:
+            resp = requests.post("https://api.notion.com/v1/pages",
+                                 headers=headers, json=payload, timeout=15)
+            if resp.status_code == 200:
+                pushed += 1
+            else:
+                print(f"  [Notion] Failed to push '{job.get('title')}': {resp.text[:200]}")
+        except Exception as e:
+            print(f"  [Notion error]: {e}")
+        time.sleep(0.4)
+
+    print(f"  [Notion] Pushed {pushed} jobs to your database.")
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def load_seen_jobs() -> set:
+    if SEEN_JOBS_FILE.exists():
+        return set(json.loads(SEEN_JOBS_FILE.read_text()))
+    return set()
+
+def save_seen_jobs(seen: set):
+    SEEN_JOBS_FILE.write_text(json.dumps(list(seen)))
+
+def scrape_greenjobs() -> list[dict]:
+    """Scrape Greenjobs.nl for Belgian sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://greenjobs.nl/en/sustainable-jobs/?location=Belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job-item, div[class*='vacancy']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://greenjobs.nl" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Greenjobs.nl"})
+        print(f"  → {len(jobs)} from Greenjobs.nl")
+    except Exception as e:
+        print(f"  [Greenjobs error]: {e}")
+    return jobs
+
+
+def scrape_impactpool() -> list[dict]:
+    """Scrape Impactpool for Belgium UN/EU/NGO jobs."""
+    jobs = []
+    try:
+        url = "https://www.impactpool.org/countries/Belgium"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job'], a[href*='/jobs/']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, .title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.impactpool.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Impactpool"})
+        print(f"  → {len(jobs)} from Impactpool")
+    except Exception as e:
+        print(f"  [Impactpool error]: {e}")
+    return jobs
+
+
+def scrape_beimpact() -> list[dict]:
+    """Scrape BeImpact for Belgian NGO/impact jobs."""
+    jobs = []
+    try:
+        url = "https://www.be-impact.org/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.be-impact.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "BeImpact"})
+        print(f"  → {len(jobs)} from BeImpact")
+    except Exception as e:
+        print(f"  [BeImpact error]: {e}")
+    return jobs
+
+
+def scrape_climatebase() -> list[dict]:
+    """Scrape Climatebase for Belgium climate jobs."""
+    jobs = []
+    try:
+        url = "https://climatebase.org/jobs?l=Belgium&q=sustainability"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, a[href*='/jobs/']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, .title")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://climatebase.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Climatebase"})
+        print(f"  → {len(jobs)} from Climatebase")
+    except Exception as e:
+        print(f"  [Climatebase error]: {e}")
+    return jobs
+
+
+def scrape_terraincognita() -> list[dict]:
+    """Scrape Terra Incognita — Belgian NGO and sustainability jobs."""
+    jobs = []
+    try:
+        url = "https://www.terraincognita.be/jobs"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.terraincognita.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Terra Incognita"})
+        print(f"  → {len(jobs)} from Terra Incognita")
+    except Exception as e:
+        print(f"  [Terra Incognita error]: {e}")
+    return jobs
+
+
+def scrape_studentjob(query: str) -> list[dict]:
+    """Scrape Studentjob.be — Belgium's largest student job & internship board."""
+    jobs = []
+    try:
+        url = "https://www.studentjob.be/en/vacatures"
+        params = {"keyword": query}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.vacancy, li.vacancy-item, div[class*='vacature'], div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .vacancy-title, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.studentjob.be" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Studentjob.be",
+                             "is_internship": True})
+        print(f"  → {len(jobs)} from Studentjob.be")
+    except Exception as e:
+        print(f"  [Studentjob.be error]: {e}")
+    return jobs
+
+
+def scrape_erasmusintern() -> list[dict]:
+    """Scrape ErasmusIntern.org — EU-wide internship placements (strong fit
+    given the candidate's KU Leuven / university exchange background)."""
+    jobs = []
+    try:
+        url = "https://erasmusintern.org/internship-search"
+        params = {"field_country_target": "Belgium"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.views-row, article, li.internship-item, div[class*='internship']")[:30]:
+            title_el = card.select_one("h2, h3, .internship-title, a")
+            company_el = card.select_one(".company, .organization, .host-organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://erasmusintern.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "ErasmusIntern",
+                             "is_internship": True})
+        print(f"  → {len(jobs)} from ErasmusIntern")
+    except Exception as e:
+        print(f"  [ErasmusIntern error]: {e}")
+    return jobs
+
+
+def scrape_idealist(query: str) -> list[dict]:
+    """Scrape Idealist.org — global nonprofit/NGO jobs and internships."""
+    jobs = []
+    try:
+        url = "https://www.idealist.org/en/jobs"
+        params = {"q": query, "loc": "Belgium"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div[data-qa*='search-result'], article, li.job-item, div[class*='listing']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".org-name, .company, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.idealist.org" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Idealist",
+                             "is_internship": "intern" in title.lower()})
+        print(f"  → {len(jobs)} from Idealist")
+    except Exception as e:
+        print(f"  [Idealist error]: {e}")
+    return jobs
+
+
+def scrape_reliefweb() -> list[dict]:
+    """Scrape ReliefWeb — UN/NGO humanitarian & development jobs, filtered to
+    Belgium; frequently includes internship postings from UN agencies/NGOs."""
+    jobs = []
+    try:
+        url = "https://reliefweb.int/jobs"
+        params = {"search": "Belgium"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("article, div.job, li.job-item, div[class*='job']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".source, .organization, .employer")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://reliefweb.int" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "ReliefWeb",
+                             "is_internship": "intern" in title.lower()})
+        print(f"  → {len(jobs)} from ReliefWeb")
+    except Exception as e:
+        print(f"  [ReliefWeb error]: {e}")
+    return jobs
+
+
+def scrape_devex(query: str) -> list[dict]:
+    """Scrape Devex — international development & sustainability jobs,
+    including internships/fellowships at NGOs, donors, and consultancies."""
+    jobs = []
+    try:
+        url = "https://www.devex.com/jobs/search"
+        params = {"query": query, "location": "Belgium"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("div.job, article, li.job-item, div[class*='job-listing']")[:30]:
+            title_el = card.select_one("h2, h3, .job-title, a")
+            company_el = card.select_one(".company, .employer, .organization")
+            link_el = card.select_one("a[href]")
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            href = link_el["href"] if link_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.devex.com" + href
+            if title and href:
+                jobs.append({"id": href + title, "title": title, "company": company,
+                             "location": "Belgium", "url": href, "description": "",
+                             "date_posted": "", "source": "Devex",
+                             "is_internship": "intern" in title.lower()})
+        print(f"  → {len(jobs)} from Devex")
+    except Exception as e:
+        print(f"  [Devex error]: {e}")
+    return jobs
+
+
+def is_too_much_experience(job: dict) -> bool:
+    """Return True if the job explicitly requires more than 3 years of experience."""
+    import re
+    text = (job.get("title", "") + " " + job.get("description", "")).lower()
+
+    # Patterns like "4 years", "5+ years", "minimum 4 jaar", "10 years experience"
+    patterns = [
+        r'(\d+)\s*\+?\s*years?\s*(of\s*)?(experience|exp)',
+        r'(\d+)\s*\+?\s*jaar\s*(ervaring|werkervaring)',
+        r'minimum\s*(\d+)\s*(years?|jaar)',
+        r'at\s*least\s*(\d+)\s*years?',
+        r'minstens\s*(\d+)\s*jaar',
+        r'(\d+)\s*to\s*\d+\s*years?\s*(of\s*)?experience',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for match in matches:
+            # Extract the first number from the match tuple
+            years = int(match[0]) if match[0].isdigit() else 0
+            if years > 3:
+                return True
+    return False
+
+
+def is_too_senior(job: dict) -> bool:
+    text = (job.get("title", "") + " " + job.get("description", "")).lower()
+    return any(kw.lower() in text for kw in SENIOR_BLOCKLIST)
+
+def deduplicate(jobs: list[dict]) -> list[dict]:
+    seen_ids, result = set(), []
+    for j in jobs:
+        if j["id"] not in seen_ids:
+            seen_ids.add(j["id"])
+            result.append(j)
+    return result
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def run_agent():
+    print(f"\n{'='*55}")
+    print(f"  Sustainability Job Agent — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*55}\n")
+
     seen = load_seen_jobs()
     all_jobs = []
- 
-    print(f"\n[company_scraper] Scraping {len(companies)} companies...")
- 
-    for company in companies:
-        print(f"\n  Scraping {company['name']}...")
-        raw_jobs = scrape_careers_page(company)
- 
-        # Remove already-seen jobs
-        new_jobs = [j for j in raw_jobs if j["id"] not in seen]
-        if not new_jobs:
-            print(f"  [{company['name']}] No new listings since last run")
-            continue
- 
-        scored = score_jobs_with_claude(new_jobs)
- 
-        for job in scored:
-            seen.add(job["id"])
- 
-        all_jobs.extend(scored)
-        time.sleep(1)  # polite crawl delay between companies
- 
-    save_seen_jobs(seen)
-    print(f"\n[company_scraper] Done. {len(all_jobs)} new relevant jobs found across company sites.")
-    return all_jobs
- 
- 
-# ─── Step 4: Weekly auto-discovery of new companies ──────────────────────────
- 
-DISCOVERY_STATE_FILE = Path(__file__).parent / "discovery_state.json"
- 
-def _load_discovery_state() -> dict:
-    if DISCOVERY_STATE_FILE.exists():
-        with open(DISCOVERY_STATE_FILE) as f:
-            return json.load(f)
-    return {"last_run": None}
- 
- 
-def _save_discovery_state():
-    with open(DISCOVERY_STATE_FILE, "w") as f:
-        json.dump({"last_run": datetime.date.today().isoformat()}, f)
- 
- 
-def _log_discovery(message: str):
-    with open(DISCOVERY_LOG, "a") as f:
-        f.write(f"[{datetime.datetime.now().isoformat()}] {message}\n")
- 
- 
-def maybe_discover_new_companies():
-    """
-    Checks if a week has passed since last discovery run.
-    If so, asks Claude to suggest 10 new companies and appends them to companies.json.
-    Fully silent — logs to company_discovery.log.
-    """
-    state = _load_discovery_state()
-    last_run = state.get("last_run")
- 
-    if last_run:
-        days_since = (datetime.date.today() - datetime.date.fromisoformat(last_run)).days
-        if days_since < 7:
-            print(f"[company_scraper] Auto-discovery skipped ({days_since} days since last run, next in {7 - days_since} days)")
-            return
- 
-    if not client:
-        print("[company_scraper] Auto-discovery skipped — no ANTHROPIC_API_KEY set")
+
+    linkedin_queries = ["sustainability consultant Belgium", "ESG CSRD analyst Belgium",
+                        "environmental project manager Belgium", "duurzaamheid adviseur",
+                        "climate policy Belgium", "NGO sustainability Belgium",
+                        "environmental communications Belgium", "sustainability advocacy Belgium",
+                        "corporate social responsibility Belgium"]
+    vdab_keywords    = ["duurzaamheid", "ESG", "milieu", "CSRD", "klimaat",
+                        "milieubeleid", "duurzame ontwikkeling"]
+    jobat_queries    = ["sustainability", "ESG", "duurzaamheid", "milieu adviseur",
+                        "NGO", "beleidsmedewerker milieu"]
+    stepstone_queries= ["sustainability Belgium", "ESG Belgium", "duurzaamheid",
+                        "environmental policy Belgium"]
+    actiris_keywords = ["sustainability", "environment", "duurzaamheid", "ESG",
+                        "politique environnementale", "NGO Brussels"]
+    eu_queries       = ["sustainability European Commission", "environment European Commission",
+                        "ESG EU institutions Belgium", "climate policy EU Brussels",
+                        "environmental officer EU agency", "European Environment Agency",
+                        "EU Green Deal policy officer"]
+    indeed_queries   = ["sustainability Belgium", "ESG CSRD Belgium", "environmental Belgium",
+                        "duurzaamheid", "milieu adviseur"]
+
+    # ── Internship-specific query sets (same sites, targeted searches) ──
+    linkedin_internship_queries = ["sustainability internship Belgium", "ESG internship Belgium",
+                        "CSRD internship Belgium", "environmental internship Belgium",
+                        "climate internship Belgium", "stage duurzaamheid",
+                        "stage milieu", "stage CSRD", "sustainability trainee Belgium"]
+    vdab_internship_keywords = ["stage duurzaamheid", "stage milieu", "stage CSRD",
+                        "afstudeerstage duurzaamheid", "stage klimaat"]
+    jobat_internship_queries = ["stage duurzaamheid", "internship sustainability",
+                        "stage milieu", "trainee ESG", "stage NGO"]
+    stepstone_internship_queries = ["internship sustainability Belgium", "stage duurzaamheid",
+                        "traineeship ESG Belgium"]
+    actiris_internship_keywords = ["stage duurzaamheid", "internship sustainability",
+                        "stage environnement"]
+    indeed_internship_queries = ["sustainability internship Belgium", "ESG internship Belgium",
+                        "stage duurzaamheid"]
+    studentjob_queries = ["duurzaamheid", "sustainability", "ESG", "milieu", "CSRD"]
+    idealist_queries = ["sustainability", "environment", "climate"]
+    devex_queries = ["sustainability", "environment", "climate"]
+
+    for q in linkedin_queries:
+        print(f"[LinkedIn] '{q}'")
+        jobs = scrape_linkedin(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(3)
+
+    for q in linkedin_internship_queries:
+        print(f"[LinkedIn Internship] '{q}'")
+        jobs = scrape_linkedin(q, internship=True)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(3)
+
+    for k in vdab_keywords:
+        print(f"[VDAB]     '{k}'")
+        jobs = scrape_vdab(k)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for k in vdab_internship_keywords:
+        print(f"[VDAB Internship] '{k}'")
+        jobs = scrape_vdab(k, internship=True)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in jobat_queries:
+        print(f"[Jobat]    '{q}'")
+        jobs = scrape_jobat(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in jobat_internship_queries:
+        print(f"[Jobat Internship] '{q}'")
+        jobs = scrape_jobat(q, internship=True)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in stepstone_queries:
+        print(f"[Stepstone] '{q}'")
+        jobs = scrape_stepstone(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in stepstone_internship_queries:
+        print(f"[Stepstone Internship] '{q}'")
+        jobs = scrape_stepstone(q, internship=True)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for k in actiris_keywords:
+        print(f"[Actiris]  '{k}'")
+        jobs = scrape_actiris(k)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for k in actiris_internship_keywords:
+        print(f"[Actiris Internship] '{k}'")
+        jobs = scrape_actiris(k, internship=True)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in indeed_queries:
+        print(f"[Indeed]   '{q}'")
+        jobs = scrape_indeed(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in indeed_internship_queries:
+        print(f"[Indeed Internship] '{q}'")
+        jobs = scrape_indeed(q, internship=True)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in studentjob_queries:
+        print(f"[Studentjob.be] '{q}'")
+        jobs = scrape_studentjob(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    print(f"[ErasmusIntern]")
+    jobs = scrape_erasmusintern()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    for q in idealist_queries:
+        print(f"[Idealist] '{q}'")
+        jobs = scrape_idealist(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    print(f"[ReliefWeb]")
+    jobs = scrape_reliefweb()
+    for j in jobs: j["category"] = "UN System"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    for q in devex_queries:
+        print(f"[Devex] '{q}'")
+        jobs = scrape_devex(q)
+        for j in jobs: j["category"] = "General"
+        all_jobs.extend(jobs)
+        time.sleep(2)
+
+    for q in eu_queries:
+        print(f"[LinkedIn EU] '{q}'")
+        jobs = scrape_linkedin(q)
+        for j in jobs: j["category"] = "EU/Policy"
+        all_jobs.extend(jobs)
+        time.sleep(3)
+
+    print(f"[EuroClimateJobs]")
+    jobs = scrape_euroclimatejobs()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+    print(f"[EuroBrussels]")
+    jobs = scrape_eurobrussels()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+    print(f"[Brussels Sustainability Club]")
+    jobs = scrape_brussels_sustainability_club()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Glassdoor]")
+    jobs = scrape_glassdoor("sustainability Belgium")
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Greenjobs]")
+    jobs = scrape_greenjobs()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Impactpool]")
+    jobs = scrape_impactpool()
+    for j in jobs: j["category"] = "UN System"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[BeImpact]")
+    jobs = scrape_beimpact()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[inClimate]")
+    jobs = scrape_inclimate()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Green Jobs Network]")
+    jobs = scrape_greenjobsnetwork()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Carbon Removal Jobs]")
+    jobs = scrape_carbonremovaljobs()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Koolenindustries]")
+    jobs = scrape_koolenindustries()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Climatebase]")
+    jobs = scrape_climatebase()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Terra Incognita]")
+    jobs = scrape_terraincognita()
+    for j in jobs: j["category"] = "General"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[EPSO]")
+    jobs = scrape_epso()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[Euraxess]")
+    jobs = scrape_euraxess()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[EU Institutions]")
+    jobs = scrape_eu_institutions()
+    for j in jobs: j["category"] = "EU/Policy"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    print(f"[UN System]")
+    jobs = scrape_un_careers()
+    for j in jobs: j["category"] = "UN System"
+    all_jobs.extend(jobs)
+    time.sleep(2)
+
+    all_jobs = deduplicate(all_jobs)
+
+    # Tag every job as internship or not — a source may have already tagged
+    # it explicitly (e.g. a LinkedIn f_E=1 or Indeed jt=internship search);
+    # everything else falls back to the title/description keyword heuristic.
+    for j in all_jobs:
+        j["is_internship"] = is_internship(j)
+
+    print(f"\n[Notion] Loading rejected companies...")
+    rejected_companies = get_rejected_companies()
+    if rejected_companies:
+        before = len(all_jobs)
+        all_jobs = [j for j in all_jobs if j.get("company", "").lower().strip() not in rejected_companies]
+        print(f"[Filter] Removed {before - len(all_jobs)} jobs from {len(rejected_companies)} rejected companies")
+    print(f"\n[Filter] {len(all_jobs)} unique jobs")
+
+    new_jobs = [j for j in all_jobs if j["id"] not in seen]
+    print(f"[Filter] {len(new_jobs)} new (unseen)")
+
+    # Seniority/experience blocklists are aimed at ruling out roles that want
+    # 4+ years of experience — that logic doesn't apply to internships, so
+    # internships skip both filters rather than risk being wrongly dropped.
+    new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_senior(j)]
+    print(f"[Filter] {len(new_jobs)} after seniority filter")
+
+    new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_much_experience(j)]
+    print(f"[Filter] {len(new_jobs)} after experience filter (max 3 years)")
+
+    if not new_jobs:
+        print("\n[Done] No new jobs this run.")
         return
- 
-    print("[company_scraper] Running weekly company auto-discovery...")
-    _log_discovery("Starting weekly auto-discovery run")
- 
-    companies = load_companies()
-    existing_names = {c["name"].lower() for c in companies}
- 
-    prompt = f"""You help a sustainability professional find relevant companies to apply to.
- 
-The candidate (Lucas, based in Leuven, Belgium) is looking for sustainability jobs at:
-- Large companies with CSRD reporting obligations (>500 employees, EU-listed)
-- High-emitting industries actively building sustainability teams (energy, chemicals, steel,
-  aviation, shipping, food & beverage, logistics, cement, agriculture, automotive)
-- Companies that recently made net-zero commitments, faced ESG scrutiny, or were fined
-  for environmental violations (they tend to hire sustainability staff quickly)
-- Belgian companies or multinationals with significant Belgian operations
- 
-Already in the list (do NOT suggest these again):
-{", ".join(sorted(existing_names))}
- 
-Suggest exactly 10 NEW companies. For each, respond ONLY with a JSON array:
-[
-  {{
-    "name": "Company Name",
-    "careers_url": "https://exact-url-to-their-jobs-page",
-    "sector": "Sector",
-    "hq": "City, Country",
-    "why_relevant": "One sentence: why this company needs sustainability talent"
-  }},
-  ...
-]
- 
-Requirements:
-- careers_url must be a real, working URL to their actual jobs/careers page
-- Vary the sectors and countries (Belgium, Netherlands, Germany, France preferred)
-- Mix pure sustainability companies with high-emitting companies in transition
-- Only return the JSON array, no other text"""
- 
-    try:
-        resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
-        new_companies = json.loads(raw)
- 
-        # Filter out any that already exist
-        added = []
-        for c in new_companies:
-            if c["name"].lower() not in existing_names:
-                companies.append(c)
-                added.append(c["name"])
-                existing_names.add(c["name"].lower())
- 
-        save_companies(companies)
-        _save_discovery_state()
- 
-        log_msg = f"Added {len(added)} new companies: {', '.join(added)}"
-        _log_discovery(log_msg)
-        print(f"[company_scraper] Auto-discovery complete — {log_msg}")
- 
-    except Exception as e:
-        err = f"Auto-discovery error: {e}"
-        _log_discovery(err)
-        print(f"[company_scraper] {err}")
- 
- 
-# ─── CLI entrypoint ───────────────────────────────────────────────────────────
- 
+
+    print(f"\n[Fetch] Getting descriptions for {len(new_jobs)} jobs...")
+    for j in new_jobs:
+        if not j["description"]:
+            j["description"] = fetch_description(j["url"])
+            time.sleep(0.8)
+        # Re-check now that a full description is available — titles alone
+        # sometimes miss internships (e.g. "Sustainability Associate (6-month
+        # internship)" gets caught, but a plain "Sustainability Associate"
+        # title with "internship" only mentioned in the body needs this pass.
+        if not j["is_internship"]:
+            j["is_internship"] = is_internship(j)
+
+# --- AI scoring ---
+    print(f"\n[Claude] Scoring {len(new_jobs)} jobs with AI...")
+    scored_jobs = score_jobs_with_claude(new_jobs)
+
+    # --- Company careers pages (direct scraping) ---
+    print(f"\n[Company scraper] Scraping company careers pages...")
+    company_jobs = run_company_scraper()
+    scored_jobs.extend(company_jobs)
+
+    # --- Weekly auto-discovery of new companies ---
+    maybe_discover_new_companies()
+
+    spontaneous = []
+    seen_companies = set()
+    for j in scored_jobs:
+        threshold = MIN_SCORE_INTERNSHIP if j.get("is_internship") else MIN_SCORE
+        if j.get("spontaneous_worthy") and j.get("score", 0) < threshold:
+            c = j.get("company", "")
+            if c and c not in seen_companies:
+                seen_companies.add(c)
+                spontaneous.append(j.copy())
+    save_seen_jobs(seen | {j["id"] for j in scored_jobs})
+    good_jobs = sum(1 for j in scored_jobs if not j.get("is_internship") and j.get("score", 0) >= MIN_SCORE)
+    good_interns = sum(1 for j in scored_jobs if j.get("is_internship") and j.get("score", 0) >= MIN_SCORE_INTERNSHIP)
+    print(f"\n[Results] {good_jobs} strong paid-job matches + {good_interns} strong internship matches "
+          f"+ {len(spontaneous)} spontaneous leads")
+    print(f"\n[Notion] Pushing to Notion...")
+    push_to_notion(scored_jobs, spontaneous)
+
+    print(f"\n[Done] Check your Notion database for new jobs!")
+
+
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Company careers page scraper")
-    parser.add_argument("--discover-only", action="store_true",
-                        help="Only run weekly company discovery, skip scraping")
-    parser.add_argument("--force-discover", action="store_true",
-                        help="Force discovery run even if <7 days since last run")
-    args = parser.parse_args()
- 
-    if args.force_discover:
-        # Reset state to force a discovery run
-        if DISCOVERY_STATE_FILE.exists():
-            DISCOVERY_STATE_FILE.unlink()
- 
-    if args.discover_only:
-        maybe_discover_new_companies()
-    else:
-        jobs = run_company_scraper()
-        maybe_discover_new_companies()
- 
-        if jobs:
-            print(f"\n{'='*60}")
-            print(f"TOP MATCHES FROM COMPANY CAREERS PAGES")
-            print(f"{'='*60}")
-            for j in sorted(jobs, key=lambda x: x.get("score", 0), reverse=True):
-                print(f"\n  [{j.get('score','?')}/10] {j['title']}")
-                print(f"  Company : {j['company']} ({j.get('sector','')})")
-                print(f"  URL     : {j['url']}")
-                print(f"  Reason  : {j.get('score_reason','')}")
-        else:
-            print("\nNo new matching jobs found on company careers pages this run.")
+    run_agent()
