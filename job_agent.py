@@ -107,10 +107,14 @@ ROLE_KEYWORDS = [
     "économie circulaire", "rse", "responsabilité sociétale",
     "impact", "policy officer", "beleidsmedewerker", "conseiller",
 ]
-# Sources that are already curated/targeted (EU/UN portals, direct company
-# career-page scraping) skip the positive-keyword requirement — they're not
-# found via noisy keyword search in the first place.
-RELEVANCE_FILTER_EXEMPT_CATEGORIES = {"EU/Policy", "UN System"}
+# No category/source is exempt from the role-relevance check below — this
+# used to skip it for EU/Policy and UN System postings on the assumption
+# that reaching those portals was itself a form of targeting, but that was
+# exactly what let generic EU/UN admin roles with no sustainability content
+# through. Marketing, project-management, policy, and consulting roles ARE
+# all wanted — but only when they carry a genuine sustainability/ESG/climate
+# mandate, which is what a ROLE_KEYWORDS match in the title/description
+# confirms regardless of which board or portal a posting came from.
 
 # Belgian job-board keyword search for "milieu"/"environment" frequently
 # surfaces unrelated blue-collar postings (waste collection, cleaning,
@@ -123,6 +127,26 @@ EXCLUDE_TITLE_KEYWORDS = [
     "heftruckchauffeur", "productiearbeider", "productiemedewerker",
     "kassier", "kassierster", "verkoper(ster)", "kok ", "keukenmedewerker",
     "bewaker", "beveiligingsagent", "monteur", "installateur elektriciteit",
+]
+
+# Employer exclusions — regardless of how well the *role* matches, postings
+# at these kinds of employers are never wanted. Keyword matching only
+# catches generic terms in the company name (e.g. "Defense Systems bv");
+# it will NOT catch a named contractor like "Lockheed Martin" or "Thales",
+# since their names don't contain the word "defense". Add specific company
+# names you come across to EXCLUDE_EMPLOYER_NAMES below — or, for anything
+# that slips through into Notion, check its "Reject Company" box there,
+# which filters that employer out of all future runs the same way.
+EXCLUDE_EMPLOYER_KEYWORDS = [
+    "defense", "defence", "weapons", "arms manufacturing", "munitions",
+    "military equipment", "ammunition",
+    "tobacco", "cigarette", "vaping",
+    "casino", "gambling", "betting", "lottery",
+]
+EXCLUDE_EMPLOYER_NAMES = [
+    # Add specific companies keyword-matching above won't catch, e.g.:
+    # "lockheed martin", "thales", "bae systems", "rheinmetall", "dassault",
+    # "philip morris", "british american tobacco", "japan tobacco",
 ]
 
 HEADERS = {
@@ -709,14 +733,22 @@ def is_offtopic_title(job: dict) -> bool:
     return any(kw in title for kw in EXCLUDE_TITLE_KEYWORDS)
 
 
+def is_excluded_employer(job: dict) -> bool:
+    """Hard employer exclusion, independent of role fit — e.g. a perfectly
+    on-topic ESG role at a defense contractor is still excluded."""
+    company = (job.get("company", "") or "").lower()
+    if not company:
+        return False
+    if any(name in company for name in EXCLUDE_EMPLOYER_NAMES):
+        return True
+    return any(kw in company for kw in EXCLUDE_EMPLOYER_KEYWORDS)
+
+
 def has_role_relevance(job: dict) -> bool:
-    """Final relevance check once a description is available. Curated
-    sources (EU/UN portals, direct company-page scraping) are exempt — they
-    weren't reached via noisy keyword search, so there's nothing to confirm."""
-    if job.get("category") in RELEVANCE_FILTER_EXEMPT_CATEGORIES:
-        return True
-    if job.get("source", "").startswith("UN Careers") or job.get("source", "").startswith("EU Institutions"):
-        return True
+    """Final relevance check once a description is available. Applies to
+    EVERY posting regardless of source — including EU institution and UN
+    agency portals, which are otherwise a common source of generic
+    admin/policy roles with no actual sustainability content."""
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
     return any(kw in text for kw in ROLE_KEYWORDS)
 
@@ -1188,6 +1220,9 @@ def run_agent():
     new_jobs = [j for j in new_jobs if not is_offtopic_title(j)]
     print(f"[Filter] {len(new_jobs)} after off-topic title filter")
 
+    new_jobs = [j for j in new_jobs if not is_excluded_employer(j)]
+    print(f"[Filter] {len(new_jobs)} after excluded-employer filter")
+
     new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_senior(j)]
     print(f"[Filter] {len(new_jobs)} after seniority filter")
     new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_much_experience(j)]
@@ -1218,6 +1253,17 @@ def run_agent():
 
     print(f"\n[Company scraper] Scraping company careers pages...")
     company_jobs = run_company_scraper()
+    # These previously skipped every filter above (off-topic title,
+    # excluded employer, role relevance) since they're added straight into
+    # scored_jobs. Whatever company_scraper.py's own target list looks like,
+    # the hard employer/role checks should still apply the same way they do
+    # to every other source.
+    before_company_filter = len(company_jobs)
+    company_jobs = [j for j in company_jobs if not is_excluded_employer(j)]
+    company_jobs = [j for j in company_jobs if has_role_relevance(j)]
+    if before_company_filter:
+        print(f"  [Company scraper] {before_company_filter} -> {len(company_jobs)} "
+              f"after employer/relevance filters")
     scored_jobs.extend(company_jobs)
 
     maybe_discover_new_companies()
