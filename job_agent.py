@@ -504,7 +504,10 @@ def scrape_un_careers() -> list[dict]:
         ("WFP", "https://career5.successfactors.eu/career?company=C0000168410P&site=Belgium"),
         ("ILO", "https://jobs.ilo.org/job-search-results/?locations=Belgium"),
         ("UNESCO", "https://careers.unesco.org/go/International-Professional-Posts/3803102/"),
-        ("IOM", "https://careers.iom.int/vacancies?country%5B%5D=BE"),
+        # careers.iom.int no longer resolves (confirmed by DNS failure in a
+        # live run) — IOM moved to an Oracle Cloud recruiting portal, which
+        # is itself a JS-heavy app and will need the Playwright fallback.
+        ("IOM", "https://fa-evlj-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs"),
         ("UNFPA", "https://www.unfpa.org/jobs"),
     ]
     for org_name, url in institutions:
@@ -599,8 +602,10 @@ BOUTIQUE_SITES = [
      "base_url": "https://inclimate.org", "location": "Europe", "category": "General"},
     {"name": "Green Jobs Network", "url": "https://www.greenjobs.com/jobs/?location=Europe",
      "base_url": "https://www.greenjobs.com", "location": "Europe", "category": "General"},
-    {"name": "Carbon Removal Jobs", "url": "https://carbonremoval.jobs/jobs",
-     "base_url": "https://carbonremoval.jobs", "location": "Belgium", "category": "General"},
+    # carbonremoval.jobs no longer resolves (confirmed by DNS failure in a
+    # live run) — the board appears to have moved/rebranded to cdrjobs.earth.
+    {"name": "Carbon Removal Jobs", "url": "https://www.cdrjobs.earth/",
+     "base_url": "https://www.cdrjobs.earth", "location": "Belgium", "category": "General"},
     {"name": "Koolenindustries", "url": "https://koolenindustries.com/jobs",
      "base_url": "https://koolenindustries.com", "location": "Europe", "category": "General"},
     {"name": "EuroClimateJobs", "url": "https://www.euroclimatejobs.com/jobs/belgium",
