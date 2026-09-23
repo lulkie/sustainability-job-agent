@@ -19,7 +19,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install anthropic requests beautifulsoup4 python-dotenv schedule
+        run: pip install anthropic requests beautifulsoup4 python-dotenv playwright
+
+      - name: Install Playwright's Chromium browser
+        run: playwright install --with-deps chromium
 
       - name: Restore seen jobs cache
         uses: actions/cache@v4
