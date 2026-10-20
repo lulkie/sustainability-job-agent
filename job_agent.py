@@ -32,7 +32,7 @@ Changes from the previous version (see CHANGES.md for the full rationale):
      - Rows you set to "To Apply" (or further) and "Not interested" (with
        "Why not") are fed to the scorer as examples of your taste.
      - Two-step scoring: Haiku screens everything; the most promising jobs get
-       a second, careful score from a stronger model on the full posting
+       a second, careful score on the full posting (both steps use Haiku 5.5)
        (deep_scoring.py). The result is the number in "Fit Score".
      - The best 10 to 15 jobs get Status "Suggested", the other good matches
        "Queue". Queue rows can be promoted later and go to Notion's trash
@@ -72,7 +72,7 @@ NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
 
 RUN_EVERY_DAYS = 7
 SEEN_JOBS_FILE = Path(__file__).parent / "seen_jobs.json"
-MODEL_SCREEN = "claude-haiku-4-5-20251001"   # step 1: cheap screen over every new posting
+MODEL_SCREEN = "claude-haiku-5-5"   # step 1: cheap screen over every new posting
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 MIN_SCORE = 6
 # Internship postings tend to have thinner descriptions to score against,
@@ -825,11 +825,16 @@ Return ONLY the JSON array."""
         try:
             response = client.messages.create(
                 model=MODEL_SCREEN,
-                max_tokens=1500,
+                # Room for the model's own thinking as well as the answer;
+                # only what's actually used is billed.
+                max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw = response.content[0].text.strip()
+            # Newer models can return a thinking block before the answer, so
+            # read only the text blocks rather than the first block.
+            raw = "".join(b.text for b in response.content if getattr(b, "type", "") == "text").strip()
             raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
+            raw = raw[raw.find("["):raw.rfind("]") + 1] if "[" in raw else raw
             for s in json.loads(raw):
                 idx = s["job_index"] - 1
                 if 0 <= idx < len(batch):

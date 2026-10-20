@@ -3,7 +3,7 @@ deep_scoring.py  —  Step 2 of scoring, and choosing what becomes "Suggested"
 ============================================================================
 Step 1 (in job_agent.py) is the cheap Haiku screen over every new posting.
 Step 2, here, gives the most promising ones a second, careful look with a
-stronger model on the full posting: what the role really needs, the evidence
+second, careful look on the full posting: what the role really needs, the evidence
 for each need in your profile, and five sub-scores. The total is computed in
 code from fixed weights, so scores stay comparable from week to week.
 
@@ -22,7 +22,7 @@ import time
 import anthropic
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL_DEEP = "claude-sonnet-5-5"
+MODEL_DEEP = "claude-haiku-5-5"   # cheap; switch to "claude-sonnet-5-5" for sharper (~10x pricier) scores
 
 MAX_DEEP_SCORES_PER_RUN = 40      # cost control
 
@@ -48,7 +48,9 @@ TRACKS = ["ESG / CSRD", "Environmental management", "Climate & energy",
 _client = None
 
 
-def _ask(system: str, user: str, max_tokens: int = 3000) -> str:
+def _ask(system: str, user: str, max_tokens: int = 8000) -> str:
+    # max_tokens leaves room for the model's own thinking as well as the
+    # answer; only what's actually used is billed.
     global _client
     if _client is None:
         _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
