@@ -1,60 +1,59 @@
 """
 company_scraper.py  —  Direct careers-page scraper + weekly auto-discovery
 ===========================================================================
-Drop this file into your sustainability_job_agent_v3 folder alongside job_agent.py.
-
 What it does:
-  1. Loads companies.json and scrapes each company's careers page for open roles
-  2. Scores every matching job with Claude (same logic as job_agent.py)
+  1. Loads companies.json and reads each company's careers page for open roles.
+     When a company's jobs run on a supported job board (Greenhouse, Lever,
+     Ashby, Workable, Recruitee, Teamtailor), its official feed is used instead,
+     which gives clean titles, locations and full descriptions. The board is
+     found automatically, from the careers link or from links on the page, and
+     remembered in companies.json as "ats".
+  2. Returns the listings UNSCORED. job_agent.py runs them through exactly the
+     same filters, two-step scoring and Notion columns as every other source.
   3. Once a week, asks Claude to discover ~10 new companies and appends them to
-     companies.json automatically (fully silent, logged to company_discovery.log)
+     companies.json (logged to company_discovery.log).
 
-Usage (standalone test):
+Usage (standalone test, prints what it finds):
     python company_scraper.py
-
-Integrated in job_agent.py — call at the bottom of your main() function:
-    from company_scraper import run_company_scraper, maybe_discover_new_companies
-    company_jobs = run_company_scraper()
-    maybe_discover_new_companies()
-    # Then merge company_jobs into your normal scored_jobs list
-
-Dependencies (already in your venv):
-    pip install requests beautifulsoup4 anthropic
 """
 
-import json
-import time
 import datetime
-import logging
+import json
 import os
 import re
+import time
 from pathlib import Path
+from urllib.parse import urljoin
 
+import anthropic
 import requests
 from bs4 import BeautifulSoup
-import anthropic
+
+import extra_sources
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 COMPANIES_FILE = Path(__file__).parent / "companies.json"
-DISCOVERY_LOG  = Path(__file__).parent / "company_discovery.log"
-SEEN_JOBS_FILE = Path(__file__).parent / "seen_jobs.json"
+DISCOVERY_LOG = Path(__file__).parent / "company_discovery.log"
+DISCOVERY_STATE_FILE = Path(__file__).parent / "discovery_state.json"
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+MODEL_DISCOVERY = "claude-sonnet-5-5"
 
-# Keywords that flag a job as potentially relevant before sending to Claude
+# Title keywords that flag a careers-page link as worth a closer look. Applied
+# to the TITLE only: the company's own description says "sustainability" for
+# every company on the list, so it can't tell one job from another.
 QUICK_FILTER_KEYWORDS = [
-    "sustainab", "esg", "csrd", "climate", "environment", "circular",
-    "carbon", "emission", "green", "renewable", "energy transition",
-    "reporting", "impact", "biodiversity", "net zero", "scope",
-    "lca", "life cycle", "waste", "water", "supply chain",
-    "intern", "trainee", "stage", "stagiair",
+    "sustainab", "esg", "csrd", "csr", "climate", "environment", "circular",
+    "carbon", "emission", "green", "renewable", "energy transition", "decarboni",
+    "reporting", "impact", "biodiversity", "net zero", "lca", "life cycle",
+    "duurzaam", "milieu", "klimaat", "durabilit", "environnement", "rse",
+    "intern", "trainee", "stage", "stagiair", "graduate", "junior",
 ]
 
 # ─── Internship detection ────────────────────────────────────────────────────
-# Shared with job_agent.py (imported from there) so every source — scraped
-# job boards and direct company careers pages alike — gets tagged the same way.
+# Shared with job_agent.py (imported from there) so every source gets tagged
+# the same way.
 
 _INTERNSHIP_TITLE_RE = re.compile(
     r"\bintern(?:ship)?\b|\btrainee(?:ship)?\b|\bstagiair\w*\b|\bstagiaire\b|"
@@ -71,11 +70,9 @@ _INTERNSHIP_DESC_RE = re.compile(
 def is_internship(job: dict) -> bool:
     """Heuristic: does this listing look like an internship/traineeship/stage?
 
-    Checked in order: an explicit flag already set at scrape time (e.g. a
-    search that specifically targeted internships), then the job title
-    (checked against a broader pattern list including the ambiguous "stage"),
-    then the description (checked against a narrower list to avoid false
-    positives from unrelated uses of "stage" like "final stage").
+    Checked in order: an explicit flag already set at scrape time, then the job
+    title (broader pattern list including the ambiguous "stage"), then the
+    description (narrower list, to avoid false positives like "final stage").
     """
     if job.get("is_internship"):
         return True
@@ -85,28 +82,22 @@ def is_internship(job: dict) -> bool:
         return True
     return False
 
-CANDIDATE_PROFILE = """
-Lucas Switsers de Roeck — sustainability professional based in Leuven, Belgium.
 
-Education:
-- MSc Sustainable Development, KU Leuven (2024-2026), major: space & society
-- MSc Environmental Sciences, University of Antwerp (2024-2025), cum laude
-  Thesis: CSRD reporting quality on financial performance
-- MSc Applied Economic Sciences / Marketing, University of Antwerp (2023-2024), cum laude
-  Exchange: Hanken School of Economics, Finland
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-GB,en;q=0.9",
+}
 
-Experience:
-- VP I2Impact: led 30-person team, international sustainability projects (Peru, Nicaragua, Benin, Uganda)
-- Project student Humasol: photovoltaic project in Senegal
-- Junior sustainability manager BOMA nv: market analysis, CSRD implementation
-- Sustainability associate, University of Antwerp climate team
+# Link texts on careers pages that are navigation, not jobs.
+_NAV_TITLES = re.compile(
+    r"^(jobs?|careers?|vacatures?|vacancies|all jobs|view all( jobs)?|see all( jobs)?|"
+    r"search jobs|job search|open positions|apply|learn more|read more|werken bij|"
+    r"join us|our jobs|job offers|offres d'emploi|emplois?)$", re.IGNORECASE)
 
-Skills: CSRD reporting, ESG analysis, behavior change communication, sustainability strategy,
-environmental science, marketing, Dutch (native), English (fluent), French (professional)
-
-Target: Junior/medior sustainability roles in Belgium or remote EU, in ESG, CSRD,
-environmental management, sustainability communications, or energy transition.
-"""
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -114,75 +105,55 @@ def load_companies() -> list[dict]:
     if not COMPANIES_FILE.exists():
         print(f"[company_scraper] companies.json not found at {COMPANIES_FILE}")
         return []
-    with open(COMPANIES_FILE) as f:
+    with open(COMPANIES_FILE, encoding="utf-8") as f:
         data = json.load(f)
     return data.get("companies", [])
 
 
 def save_companies(companies: list[dict]):
-    existing = {}
+    existing = {"meta": {}}
     if COMPANIES_FILE.exists():
-        with open(COMPANIES_FILE) as f:
+        with open(COMPANIES_FILE, encoding="utf-8") as f:
             existing = json.load(f)
     existing["companies"] = companies
+    existing.setdefault("meta", {})
     existing["meta"]["total_companies"] = len(companies)
     existing["meta"]["last_updated"] = datetime.date.today().isoformat()
-    with open(COMPANIES_FILE, "w") as f:
+    with open(COMPANIES_FILE, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2, ensure_ascii=False)
 
 
-def load_seen_jobs() -> set:
-    if SEEN_JOBS_FILE.exists():
-        with open(SEEN_JOBS_FILE) as f:
-            return set(json.load(f))
-    return set()
-
-
-def save_seen_jobs(seen: set):
-    with open(SEEN_JOBS_FILE, "w") as f:
-        json.dump(list(seen), f)
-
-
 def quick_match(text: str) -> bool:
-    """Fast keyword pre-filter before calling Claude."""
-    text_lower = text.lower()
+    """Fast keyword pre-filter before anything costs time or money."""
+    text_lower = (text or "").lower()
     return any(kw in text_lower for kw in QUICK_FILTER_KEYWORDS)
 
 
-# ─── Step 1: Scrape a single careers page ────────────────────────────────────
+# ─── Step 1: Read a single careers page ──────────────────────────────────────
 
-def scrape_careers_page(company: dict) -> list[dict]:
+def scrape_careers_page(company: dict) -> tuple[list[dict], dict | None]:
     """
-    Fetch the company's careers page and extract job listings.
-    Returns a list of raw job dicts (not yet scored).
+    Fetch the company's careers page and extract job links.
+    Returns (raw job dicts, a supported job board found on the page or None).
     """
     url = company["careers_url"]
     name = company["name"]
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-GB,en;q=0.9",
-    }
 
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
+        resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
     except Exception as e:
         print(f"  [{name}] Fetch error: {e}")
-        return []
+        return [], None
+
+    ats = extra_sources.find_ats_in_html(resp.text, resp.url or url)
+    if ats:
+        return [], ats
 
     soup = BeautifulSoup(resp.text, "html.parser")
-
-    # Remove nav, footer, scripts to reduce noise
     for tag in soup(["nav", "footer", "script", "style", "header"]):
         tag.decompose()
 
-    jobs = []
-
-    # Strategy 1: look for common job-listing patterns
     job_selectors = [
         "a[href*='job']", "a[href*='career']", "a[href*='vacancy']",
         "a[href*='vacature']", "a[href*='position']", "a[href*='opening']",
@@ -191,7 +162,7 @@ def scrape_careers_page(company: dict) -> list[dict]:
         "[class*='vacancy']", "[class*='position-item']",
     ]
 
-    seen_hrefs = set()
+    jobs, seen_hrefs = [], set()
     for selector in job_selectors:
         for el in soup.select(selector)[:50]:
             title = el.get_text(separator=" ", strip=True)[:120]
@@ -202,152 +173,80 @@ def scrape_careers_page(company: dict) -> list[dict]:
                 if not title and link:
                     title = link.get_text(strip=True)[:120]
 
-            if not title or len(title) < 5:
+            if not title or len(title) < 5 or _NAV_TITLES.match(title.strip()):
                 continue
-            if href in seen_hrefs:
-                continue
-
-            # Make absolute URL
             if href and not href.startswith("http"):
-                from urllib.parse import urljoin
                 href = urljoin(url, href)
-
+            if not href or href in seen_hrefs or href.rstrip("/") == url.rstrip("/"):
+                continue
             seen_hrefs.add(href)
 
             job = {
-                "id": f"{name}::{href or title}",
+                "id": f"{name}::{href}",
                 "title": title,
                 "company": name,
                 "location": company.get("hq", ""),
-                "url": href or url,
-                "description": company.get("why_relevant", ""),
+                "url": href,
+                # Left empty on purpose: job_agent.py fetches the real posting.
+                # (It used to hold the company blurb, which mentions
+                # sustainability for every company and so let every link
+                # through the relevance filter.)
+                "description": "",
+                "company_note": company.get("why_relevant", ""),
                 "sector": company.get("sector", ""),
                 "source": "Direct (company site)",
+                "category": "Company site",
                 "date_posted": "",
             }
             job["is_internship"] = is_internship(job)
             jobs.append(job)
 
-    # Deduplicate by title similarity
     unique = {j["title"].lower()[:60]: j for j in jobs}
-    result = list(unique.values())
-
-    print(f"  [{name}] Found {len(result)} candidate listings on careers page")
-    return result
+    return list(unique.values()), None
 
 
-# ─── Step 2: Score jobs with Claude ──────────────────────────────────────────
-
-def score_jobs_with_claude(jobs: list[dict]) -> list[dict]:
-    """
-    Filter by keyword first, then score remaining jobs with Claude.
-    Returns only jobs with score >= 6.
-    """
-    if not client:
-        print("  [Claude] No API key — returning keyword-filtered jobs unscored")
-        return [j for j in jobs if quick_match(j["title"] + " " + j.get("description", ""))]
-
-    # Pre-filter with keywords to avoid unnecessary API calls
-    candidates = [j for j in jobs if quick_match(j["title"] + " " + j.get("description", ""))]
-    print(f"  [Claude] {len(candidates)} jobs passed keyword filter, scoring with Claude...")
-
-    if not candidates:
-        return []
-
-    # Batch into groups of 10 to keep prompt size manageable
-    scored = []
-    for i in range(0, len(candidates), 10):
-        batch = candidates[i:i+10]
-        job_list = "\n".join(
-            f"{idx+1}. [{j['company']}] {j['title']} | {j.get('sector','')}"
-            for idx, j in enumerate(batch)
-        )
-
-        prompt = f"""You are a job-fit scorer for a sustainability professional.
-
-Candidate profile:
-{CANDIDATE_PROFILE}
-
-Score each job from 1–10 for fit. Return ONLY a JSON array like:
-[{{"index": 1, "score": 8, "reason": "short reason"}}, ...]
-
-Jobs to score:
-{job_list}
-
-Rules:
-- Score 8–10: strong match (sustainability/ESG/CSRD/environment role, entry or junior level)
-- Score 6–7: partial match (adjacent role where sustainability background adds value)  
-- Score 1–5: poor match (unrelated, senior-only, or purely technical/IT)
-- Only return the JSON array, no other text."""
-
-        try:
-            resp = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text.strip()
-            # Strip markdown fences if present
-            raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
-            scores = json.loads(raw)
-
-            for item in scores:
-                idx = item["index"] - 1
-                if 0 <= idx < len(batch) and item["score"] >= 6:
-                    job = batch[idx].copy()
-                    job["score"] = item["score"]
-                    job["score_reason"] = item.get("reason", "")
-                    scored.append(job)
-
-        except Exception as e:
-            print(f"  [Claude] Scoring error: {e} — keeping keyword-matched jobs")
-            scored.extend(batch)
-
-        time.sleep(0.5)  # be polite to the API
-
-    return scored
-
-
-# ─── Step 3: Run full company scraper ────────────────────────────────────────
+# ─── Step 2: Run over every company ──────────────────────────────────────────
 
 def run_company_scraper() -> list[dict]:
     """
-    Main entry point. Scrapes all companies in companies.json,
-    scores matches, filters out seen jobs.
-    Returns list of new scored jobs.
+    Reads every company in companies.json. Returns raw, unscored listings that
+    pass the title pre-filter; job_agent.py filters, scores and pushes them.
     """
     companies = load_companies()
-    seen = load_seen_jobs()
-    all_jobs = []
+    all_jobs, changed = [], False
 
-    print(f"\n[company_scraper] Scraping {len(companies)} companies...")
+    print(f"\n[company_scraper] Reading {len(companies)} companies...")
 
     for company in companies:
-        print(f"\n  Scraping {company['name']}...")
-        raw_jobs = scrape_careers_page(company)
-
-        # Remove already-seen jobs
-        new_jobs = [j for j in raw_jobs if j["id"] not in seen]
-        if not new_jobs:
-            print(f"  [{company['name']}] No new listings since last run")
-            continue
-
-        scored = score_jobs_with_claude(new_jobs)
-
-        for job in scored:
-            seen.add(job["id"])
-
-        all_jobs.extend(scored)
+        name = company["name"]
+        ats = company.get("ats") or extra_sources.detect_ats(company.get("careers_url", ""))
+        if not ats:
+            found, ats = scrape_careers_page(company)
+            if ats:
+                company["ats"] = ats
+                changed = True
+                print(f"  [{name}] Uses {ats['type']} — switching to its official job feed")
+        if ats:
+            found = extra_sources.fetch_board(ats, name)
+            for j in found:
+                j["category"] = "Company site"
+                j["company_note"] = company.get("why_relevant", "")
+                j["sector"] = company.get("sector", "")
+                j["is_internship"] = is_internship(j)
+            kept = [j for j in found if quick_match(j["title"] + " " + j["description"])]
+        else:
+            kept = [j for j in found if quick_match(j["title"])]
+        print(f"  [{name}] {len(found)} listings, {len(kept)} worth a closer look")
+        all_jobs.extend(kept)
         time.sleep(1)  # polite crawl delay between companies
 
-    save_seen_jobs(seen)
-    print(f"\n[company_scraper] Done. {len(all_jobs)} new relevant jobs found across company sites.")
+    if changed:
+        save_companies(companies)
+    print(f"[company_scraper] Done. {len(all_jobs)} listings passed the title check.")
     return all_jobs
 
 
-# ─── Step 4: Weekly auto-discovery of new companies ──────────────────────────
-
-DISCOVERY_STATE_FILE = Path(__file__).parent / "discovery_state.json"
+# ─── Step 3: Weekly auto-discovery of new companies ──────────────────────────
 
 def _load_discovery_state() -> dict:
     if DISCOVERY_STATE_FILE.exists():
@@ -362,15 +261,14 @@ def _save_discovery_state():
 
 
 def _log_discovery(message: str):
-    with open(DISCOVERY_LOG, "a") as f:
+    with open(DISCOVERY_LOG, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.datetime.now().isoformat()}] {message}\n")
 
 
 def maybe_discover_new_companies():
     """
-    Checks if a week has passed since last discovery run.
-    If so, asks Claude to suggest 10 new companies and appends them to companies.json.
-    Fully silent — logs to company_discovery.log.
+    Checks if a week has passed since the last discovery run. If so, asks
+    Claude to suggest 10 new companies and appends them to companies.json.
     """
     state = _load_discovery_state()
     last_run = state.get("last_run")
@@ -378,10 +276,11 @@ def maybe_discover_new_companies():
     if last_run:
         days_since = (datetime.date.today() - datetime.date.fromisoformat(last_run)).days
         if days_since < 7:
-            print(f"[company_scraper] Auto-discovery skipped ({days_since} days since last run, next in {7 - days_since} days)")
+            print(f"[company_scraper] Auto-discovery skipped ({days_since} days since last run, "
+                  f"next in {7 - days_since} days)")
             return
 
-    if not client:
+    if not ANTHROPIC_API_KEY:
         print("[company_scraper] Auto-discovery skipped — no ANTHROPIC_API_KEY set")
         return
 
@@ -393,18 +292,19 @@ def maybe_discover_new_companies():
 
     prompt = f"""You help a sustainability professional find relevant companies to apply to.
 
-The candidate (Lucas, based in Leuven, Belgium) is looking for sustainability jobs at:
+The candidate (Lucas, based in Leuven, Belgium) is looking for junior sustainability jobs at:
 - Large companies with CSRD reporting obligations (>500 employees, EU-listed)
 - High-emitting industries actively building sustainability teams (energy, chemicals, steel,
   aviation, shipping, food & beverage, logistics, cement, agriculture, automotive)
 - Companies that recently made net-zero commitments, faced ESG scrutiny, or were fined
   for environmental violations (they tend to hire sustainability staff quickly)
+- Sustainability consultancies, ESG software companies and climate-tech companies
 - Belgian companies or multinationals with significant Belgian operations
 
 Already in the list (do NOT suggest these again):
 {", ".join(sorted(existing_names))}
 
-Suggest exactly 10 NEW companies. For each, respond ONLY with a JSON array:
+Suggest exactly 10 NEW companies. Respond ONLY with a JSON array:
 [
   {{
     "name": "Company Name",
@@ -412,29 +312,32 @@ Suggest exactly 10 NEW companies. For each, respond ONLY with a JSON array:
     "sector": "Sector",
     "hq": "City, Country",
     "why_relevant": "One sentence: why this company needs sustainability talent"
-  }},
-  ...
+  }}
 ]
 
 Requirements:
-- careers_url must be a real, working URL to their actual jobs/careers page
-- Vary the sectors and countries (Belgium, Netherlands, Germany, France preferred)
+- careers_url must be a real, working URL to their actual jobs page. If the company
+  publishes its jobs on Greenhouse, Lever, Ashby, Workable, Recruitee or Teamtailor,
+  give that job-board link.
+- The company must hire in Belgium (offices or operations there)
 - Mix pure sustainability companies with high-emitting companies in transition
 - Only return the JSON array, no other text"""
 
     try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
+            model=MODEL_DISCOVERY,
+            max_tokens=2500,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = resp.content[0].text.strip()
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
         raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
-        new_companies = json.loads(raw)
+        new_companies = json.loads(raw[raw.find("["):raw.rfind("]") + 1])
 
-        # Filter out any that already exist
         added = []
         for c in new_companies:
+            if not isinstance(c, dict) or not c.get("name") or not c.get("careers_url"):
+                continue
             if c["name"].lower() not in existing_names:
                 companies.append(c)
                 added.append(c["name"])
@@ -464,25 +367,12 @@ if __name__ == "__main__":
                         help="Force discovery run even if <7 days since last run")
     args = parser.parse_args()
 
-    if args.force_discover:
-        # Reset state to force a discovery run
-        if DISCOVERY_STATE_FILE.exists():
-            DISCOVERY_STATE_FILE.unlink()
+    if args.force_discover and DISCOVERY_STATE_FILE.exists():
+        DISCOVERY_STATE_FILE.unlink()
 
     if args.discover_only:
         maybe_discover_new_companies()
     else:
         jobs = run_company_scraper()
-        maybe_discover_new_companies()
-
-        if jobs:
-            print(f"\n{'='*60}")
-            print(f"TOP MATCHES FROM COMPANY CAREERS PAGES")
-            print(f"{'='*60}")
-            for j in sorted(jobs, key=lambda x: x.get("score", 0), reverse=True):
-                print(f"\n  [{j.get('score','?')}/10] {j['title']}")
-                print(f"  Company : {j['company']} ({j.get('sector','')})")
-                print(f"  URL     : {j['url']}")
-                print(f"  Reason  : {j.get('score_reason','')}")
-        else:
-            print("\nNo new matching jobs found on company careers pages this run.")
+        for j in jobs:
+            print(f"  {j['company']}: {j['title']}  ({j['url']})")
