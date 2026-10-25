@@ -26,22 +26,6 @@ Changes from the previous version (see CHANGES.md for the full rationale):
      reworded across boards) are merged into a single row instead of
      appearing as separate list entries.
 
-  4. Learning and selection (October 2026):
-     - Your profile is read from the "Job Agent Profile" page in Notion
-       (NOTION_PROFILE_PAGE_ID); CANDIDATE_PROFILE below is only a fallback.
-     - Rows you set to "To Apply" (or further) and "Not interested" (with
-       "Why not") are fed to the scorer as examples of your taste.
-     - Two-step scoring: Haiku screens everything; the most promising jobs get
-       a second, careful score on the full posting (both steps use Haiku 5.5)
-       (deep_scoring.py). The result is the number in "Fit Score".
-     - The best 10 to 15 jobs get Status "Suggested", the other good matches
-       "Queue". Queue rows can be promoted later and go to Notion's trash
-       after 14 days.
-     - Extra sources: Adzuna and Google Jobs for Belgium, and official job
-       feeds for companies on supported job boards (extra_sources.py).
-     - Company careers-page jobs go through the same filters and scoring as
-       everything else.
-
 Requires: requests, beautifulsoup4, python-dotenv, anthropic
 Optional: playwright (+ `playwright install chromium`) — enables the
 JS-rendering fallback in point 1. Without it the agent still runs, using
@@ -58,22 +42,17 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import anthropic
-load_dotenv()  # before the imports below: they read their keys when loaded
-
 from company_scraper import run_company_scraper, maybe_discover_new_companies, is_internship
-import deep_scoring
-import extra_sources
-import notion_learning
+
+load_dotenv()
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
 
-RUN_EVERY_DAYS = 7
-SEEN_JOBS_FILE = Path(__file__).parent / "seen_jobs.json"
-MODEL_SCREEN = "claude-haiku-5-5"   # step 1: cheap screen over every new posting
-DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+RUN_EVERY_DAYS = 3
+SEEN_JOBS_FILE = Path("seen_jobs.json")
 MIN_SCORE = 6
 # Internship postings tend to have thinner descriptions to score against,
 # so a slightly lower bar keeps genuinely relevant ones from being dropped.
@@ -780,9 +759,7 @@ def has_role_relevance(job: dict) -> bool:
 
 
 # ─── AI Scoring ───────────────────────────────────────────────────────────────
-def score_jobs_with_claude(jobs: list[dict], profile: str = CANDIDATE_PROFILE,
-                           taste: str = "") -> list[dict]:
-    """Step 1 of scoring: a quick Haiku score for every new posting."""
+def score_jobs_with_claude(jobs: list[dict]) -> list[dict]:
     if not ANTHROPIC_API_KEY:
         print("  [Warning] No ANTHROPIC_API_KEY — skipping AI scoring.")
         for j in jobs:
@@ -806,9 +783,7 @@ Description: {j['description'][:600] or '(none)'}
 """
         prompt = f"""You are a career advisor helping a sustainability candidate find jobs AND internships in Belgium.
 CANDIDATE PROFILE:
-{profile}
-HIS TASTE SO FAR (roles he said yes and no to; learn from them, do not copy them):
-{taste or "(no examples yet)"}
+{CANDIDATE_PROFILE}
 JOBS TO EVALUATE:
 {job_list_text}
 Respond ONLY with a valid JSON array. Each element:
@@ -824,17 +799,12 @@ Respond ONLY with a valid JSON array. Each element:
 Return ONLY the JSON array."""
         try:
             response = client.messages.create(
-                model=MODEL_SCREEN,
-                # Room for the model's own thinking as well as the answer;
-                # only what's actually used is billed.
-                max_tokens=8000,
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
-            # Newer models can return a thinking block before the answer, so
-            # read only the text blocks rather than the first block.
-            raw = "".join(b.text for b in response.content if getattr(b, "type", "") == "text").strip()
+            raw = response.content[0].text.strip()
             raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
-            raw = raw[raw.find("["):raw.rfind("]") + 1] if "[" in raw else raw
             for s in json.loads(raw):
                 idx = s["job_index"] - 1
                 if 0 <= idx < len(batch):
@@ -872,8 +842,7 @@ def ensure_notion_schema() -> dict:
     an unrecognized property to Notion fails the ENTIRE page, not just that
     field. If the integration can't alter the schema, this just logs and
     moves on; the title-prefix still makes internships obvious."""
-    available = {"Employment Type": False, "Also Posted On": False,
-                 notion_learning.PROP_FIT_SCORE: False, notion_learning.PROP_WHY_NOT: False}
+    available = {"Employment Type": False, "Also Posted On": False}
     if not NOTION_API_KEY or not NOTION_DATABASE_ID:
         return available
     headers = {
@@ -900,17 +869,6 @@ def ensure_notion_schema() -> dict:
             available["Also Posted On"] = True
         else:
             patch_props["Also Posted On"] = {"rich_text": {}}
-        # Fit Score: the number from the two-step scoring (your star "Score"
-        # column stays). Why not: a few words when you mark "Not interested".
-        fit, why = notion_learning.PROP_FIT_SCORE, notion_learning.PROP_WHY_NOT
-        if fit in existing_props:
-            available[fit] = existing_props[fit].get("type") == "number"
-        else:
-            patch_props[fit] = {"number": {"format": "number"}}
-        if why in existing_props:
-            available[why] = True
-        else:
-            patch_props[why] = {"rich_text": {}}
         if patch_props:
             patch_resp = requests.patch(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
                                          headers=headers, json={"properties": patch_props}, timeout=15)
@@ -926,25 +884,10 @@ def ensure_notion_schema() -> dict:
     return available
 
 
-def _select_name(text: str, default: str = "Other") -> str:
-    """Notion select options can't contain commas and are limited to 100 characters."""
-    return (text or default).replace(",", " ·")[:100] or default
-
-
-def push_to_notion(entries: list[tuple], promotions: list[dict] = ()):
-    """Push scored jobs to the Notion database.
-    entries: (job, status, is_spontaneous) — status is "Suggested", "Queue" or "New".
-    promotions: existing Queue rows that move up to "Suggested"."""
+def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
+    """Push scored jobs to a Notion database."""
     if not NOTION_API_KEY or not NOTION_DATABASE_ID:
         print("  [Notion] No credentials set — skipping Notion push.")
-        return
-    if DRY_RUN:
-        print("  [Notion] DRY_RUN is on: nothing is written. This is what would be added:")
-        for job, status, is_spont in sorted(entries, key=lambda e: -e[0].get("score", 0)):
-            print(f"    {status:<10} {job.get('score', 0):>4}  {job.get('title')} @ {job.get('company')}"
-                  + ("  (spontaneous)" if is_spont else ""))
-        for row in promotions:
-            print(f"    Queue -> Suggested  {row.get('title')} @ {row.get('company')}")
         return
     schema_available = ensure_notion_schema()
     headers = {
@@ -953,15 +896,15 @@ def push_to_notion(entries: list[tuple], promotions: list[dict] = ()):
         "Notion-Version": "2022-06-28",
     }
 
-    promoted = sum(notion_learning.set_status(r["id"], notion_learning.STATUS_SUGGESTED)
-                   for r in promotions)
-    if promotions:
-        print(f"  [Notion] Moved {promoted} rows from Queue up to Suggested.")
+    def _threshold(j: dict) -> int:
+        return MIN_SCORE_INTERNSHIP if j.get("is_internship") else MIN_SCORE
 
-    # Lowest score first, so the highest scored jobs end up at the top of Notion
-    all_to_push = sorted(entries, key=lambda e: e[0].get("score", 0))
+    all_to_push = [(j, False) for j in jobs if j.get("score", 0) >= _threshold(j)]
+    all_to_push += [(j, True) for j in spontaneous]
+    # Reverse so highest scored jobs end up at top of Notion
+    all_to_push = sorted(all_to_push, key=lambda x: x[0].get("score", 0))
     pushed = 0
-    for job, status, is_spont in all_to_push:
+    for job, is_spont in all_to_push:
         highlights = " | ".join(job.get("match_highlights", []))
         job_type = "Spontaneous" if is_spont else "Vacancy"
         score = job.get("score", 0)
@@ -973,18 +916,16 @@ def push_to_notion(entries: list[tuple], promotions: list[dict] = ()):
             "Job Title": {"title": [{"text": {"content": title_text}}]},
             "Company": {"rich_text": [{"text": {"content": job.get("company", "")}}]},
             "Location": {"rich_text": [{"text": {"content": job.get("location", "")}}]},
-            "Source": {"select": {"name": _select_name(job.get("source"))}},
+            "Source": {"select": {"name": job.get("source", "Other")}},
             "Score": {"select": {"name": "⭐⭐⭐ Excellent" if score >= 8 else "⭐⭐ Good" if score >= 6 else "⭐ Moderate"}},
             "Type": {"select": {"name": job_type}},
             "URL": {"url": job.get("url", "") or None},
-            "Category": {"select": {"name": _select_name(job.get("category"), "General")}},
+            "Category": {"select": {"name": job.get("category", "General")}},
             "Reasoning": {"rich_text": [{"text": {"content": job.get("reasoning", "")[:2000]}}]},
             "Highlights": {"rich_text": [{"text": {"content": highlights[:2000]}}]},
             "Date Found": {"date": {"start": datetime.datetime.now().strftime("%Y-%m-%d")}},
-            "Status": {"select": {"name": status}},
+            "Status": {"select": {"name": "New"}},
         }
-        if schema_available.get(notion_learning.PROP_FIT_SCORE):
-            properties[notion_learning.PROP_FIT_SCORE] = {"number": round(float(score), 1)}
         if schema_available.get("Employment Type"):
             properties["Employment Type"] = {
                 "select": {"name": "🎓 Internship" if is_intern else "💼 Paid Job"}
@@ -1129,16 +1070,6 @@ def run_agent():
     seen = load_seen_jobs()
     all_jobs = []
 
-    # What Notion knows: your profile page, your yes/no choices, the Queue,
-    # and the links already in the database.
-    profile = notion_learning.load_profile(CANDIDATE_PROFILE)
-    rows = notion_learning.load_rows()
-    taste = notion_learning.taste_block(rows)
-    notion_learning.expire_queue(rows, dry_run=DRY_RUN)
-    known_urls = notion_learning.existing_urls(rows)
-    print(f"[Taste] {sum(1 for r in rows if r.get('status') in notion_learning.STATUSES_YES)} yes, "
-          f"{sum(1 for r in rows if r.get('status') == notion_learning.STATUS_NOT_INTERESTED)} no examples\n")
-
     linkedin_queries = ["sustainability consultant Belgium", "ESG CSRD analyst Belgium",
                         "environmental project manager Belgium", "duurzaamheid adviseur",
                         "climate policy Belgium", "NGO sustainability Belgium",
@@ -1271,13 +1202,6 @@ def run_agent():
     _extend(scrape_un_careers(), "UN System")
     time.sleep(2)
 
-    # New sources with official data connections (Adzuna, Google Jobs)
-    all_jobs.extend(extra_sources.collect_extra())
-
-    # Company careers pages: raw listings, scored below like everything else
-    print(f"\n[Company scraper] Reading company careers pages...")
-    all_jobs.extend(run_company_scraper())
-
     all_jobs = deduplicate(all_jobs)
     for j in all_jobs:
         j["is_internship"] = is_internship(j)
@@ -1295,9 +1219,8 @@ def run_agent():
         print(f"[Filter] Removed {before - len(all_jobs)} jobs from {len(rejected_companies)} rejected companies")
 
     print(f"\n[Filter] {len(all_jobs)} unique jobs")
-    new_jobs = [j for j in all_jobs if j["id"] not in seen
-                and notion_learning.normalize_url(j.get("url", "")) not in known_urls]
-    print(f"[Filter] {len(new_jobs)} new (not seen before and not already in Notion)")
+    new_jobs = [j for j in all_jobs if j["id"] not in seen]
+    print(f"[Filter] {len(new_jobs)} new (unseen)")
 
     new_jobs = [j for j in new_jobs if not is_offtopic_title(j)]
     print(f"[Filter] {len(new_jobs)} after off-topic title filter")
@@ -1310,11 +1233,8 @@ def run_agent():
     new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_much_experience(j)]
     print(f"[Filter] {len(new_jobs)} after experience filter (max {MAX_YEARS_EXPERIENCE} years)")
 
-    maybe_discover_new_companies()
-
     if not new_jobs:
         print("\n[Done] No new jobs this run.")
-        close_browser()
         return
 
     print(f"\n[Fetch] Getting descriptions for {len(new_jobs)} jobs...")
@@ -1329,77 +1249,49 @@ def run_agent():
     print(f"[Filter] {len(new_jobs)} after role/title relevance filter")
     if not new_jobs:
         print("\n[Done] No new jobs this run.")
-        close_browser()
         return
 
-    # ── Step 1: quick Haiku score for everything ───────────────────────────
-    print(f"\n[Claude] Step 1: quick score for {len(new_jobs)} jobs...")
-    scored_jobs = score_jobs_with_claude(new_jobs, profile, taste)
-    screened_ids = {j["id"] for j in scored_jobs}
+    print(f"\n[Claude] Scoring {len(new_jobs)} jobs with AI...")
+    scored_jobs = score_jobs_with_claude(new_jobs)
     scored_jobs = [j for j in scored_jobs if j.get("seniority_ok", True) and j.get("location_ok", True)]
     print(f"[Filter] {len(scored_jobs)} after Claude's own seniority/location check")
 
-    def _threshold(j: dict) -> float:
-        return MIN_SCORE_INTERNSHIP if j.get("is_internship") else MIN_SCORE
+    print(f"\n[Company scraper] Scraping company careers pages...")
+    company_jobs = run_company_scraper()
+    # These previously skipped every filter above (off-topic title,
+    # excluded employer, role relevance) since they're added straight into
+    # scored_jobs. Whatever company_scraper.py's own target list looks like,
+    # the hard employer/role checks should still apply the same way they do
+    # to every other source.
+    before_company_filter = len(company_jobs)
+    company_jobs = [j for j in company_jobs if not is_excluded_employer(j)]
+    company_jobs = [j for j in company_jobs if has_role_relevance(j)]
+    if before_company_filter:
+        print(f"  [Company scraper] {before_company_filter} -> {len(company_jobs)} "
+              f"after employer/relevance filters")
+    scored_jobs.extend(company_jobs)
 
-    for j in scored_jobs:
-        j["fit_score"] = float(j.get("score", 0))
+    maybe_discover_new_companies()
 
-    # ── Step 2: careful score for the most promising ones ──────────────────
-    promising = sorted([j for j in scored_jobs if j["fit_score"] >= _threshold(j)],
-                       key=lambda j: -j["fit_score"])
-    to_deep = promising[:deep_scoring.MAX_DEEP_SCORES_PER_RUN]
-    if to_deep and ANTHROPIC_API_KEY:
-        print(f"\n[Claude] Step 2: careful score for the {len(to_deep)} most promising jobs...")
-        for j in to_deep:
-            if len(j.get("description", "")) < 800:
-                fuller = fetch_description(j["url"])
-                if len(fuller) > len(j.get("description", "")):
-                    j["description"] = fuller
-            result = deep_scoring.deep_score(j, profile, taste)
-            if result:
-                deep_scoring.apply_result(j, result)
-                print(f"  {j['fit_score']:>4} · {j.get('track') or '?':<24} · {j['title']} @ {j['company']}")
-            time.sleep(0.5)
-        scored_jobs = [j for j in scored_jobs if j.get("location_ok", True)]
-
-    # ── Choose Suggested and Queue ──────────────────────────────────────────
-    pool = [{"score": j["score"], "wild": j.get("track") == "Wildcard", "kind": "new", "item": j}
-            for j in scored_jobs if j["score"] >= _threshold(j)]
-    queue_rows = [r for r in rows if r.get("status") == notion_learning.STATUS_QUEUE
-                  and r.get("fit_score") is not None]
-    pool += [{"score": float(r["fit_score"]), "wild": False, "kind": "queue", "item": r}
-             for r in queue_rows]
-    chosen = deep_scoring.select_suggested(pool)
-    chosen_ids = {id(p) for p in chosen}
-
-    entries = [(p["item"], notion_learning.STATUS_SUGGESTED, False) for p in chosen if p["kind"] == "new"]
-    promotions = [p["item"] for p in chosen if p["kind"] == "queue"]
-    queued = [p["item"] for p in sorted(pool, key=lambda p: -p["score"])
-              if p["kind"] == "new" and id(p) not in chosen_ids][:deep_scoring.QUEUE_CAP]
-    entries += [(j, notion_learning.STATUS_QUEUE, False) for j in queued]
-
-    # Spontaneous leads: below the bar for this vacancy, but a company worth
-    # contacting. Added with Status "New", as before.
     spontaneous = []
     seen_companies = set()
     for j in scored_jobs:
-        if j.get("spontaneous_worthy") and j.get("score", 0) < _threshold(j):
+        threshold = MIN_SCORE_INTERNSHIP if j.get("is_internship") else MIN_SCORE
+        if j.get("spontaneous_worthy") and j.get("score", 0) < threshold:
             c = j.get("company", "")
             if c and c not in seen_companies:
                 seen_companies.add(c)
                 spontaneous.append(j.copy())
-    entries += [(j, notion_learning.STATUS_NEW, True) for j in spontaneous]
 
-    if not DRY_RUN:
-        save_seen_jobs(seen | screened_ids)
+    save_seen_jobs(seen | {j["id"] for j in scored_jobs})
 
-    n_suggested = len(chosen)
-    print(f"\n[Results] {n_suggested} Suggested ({len(promotions)} of them moved up from Queue), "
-          f"{len(queued)} to Queue, {len(spontaneous)} spontaneous leads")
+    good_jobs = sum(1 for j in scored_jobs if not j.get("is_internship") and j.get("score", 0) >= MIN_SCORE)
+    good_interns = sum(1 for j in scored_jobs if j.get("is_internship") and j.get("score", 0) >= MIN_SCORE_INTERNSHIP)
+    print(f"\n[Results] {good_jobs} strong paid-job matches + {good_interns} strong internship matches "
+          f"+ {len(spontaneous)} spontaneous leads")
 
     print(f"\n[Notion] Pushing to Notion...")
-    push_to_notion(entries, promotions)
+    push_to_notion(scored_jobs, spontaneous)
 
     close_browser()
     print(f"\n[Done] Check your Notion database for new jobs!")
