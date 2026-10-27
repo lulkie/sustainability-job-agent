@@ -41,6 +41,9 @@ DISCOVERY_LOG  = Path(__file__).parent / "company_discovery.log"
 SEEN_JOBS_FILE = Path(__file__).parent / "seen_jobs.json"
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Claude Sonnet 4 (used here before) has been retired, so every call failed.
+MODEL_SCORE = "claude-haiku-4-5-20251001"   # same cheap model as job_agent.py
+MODEL_DISCOVERY = "claude-sonnet-5-5"       # weekly company suggestions need broader knowledge
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 # Keywords that flag a job as potentially relevant before sending to Claude
@@ -282,11 +285,11 @@ Rules:
 
         try:
             resp = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=MODEL_SCORE,
                 max_tokens=800,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw = resp.content[0].text.strip()
+            raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
             # Strip markdown fences if present
             raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
             scores = json.loads(raw)
@@ -424,13 +427,13 @@ Requirements:
 
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
+            model=MODEL_DISCOVERY,
+            max_tokens=8000,   # room for the model's thinking too; only what's used is billed
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = resp.content[0].text.strip()
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
         raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
-        new_companies = json.loads(raw)
+        new_companies = json.loads(raw[raw.find("["):raw.rfind("]") + 1])
 
         # Filter out any that already exist
         added = []
