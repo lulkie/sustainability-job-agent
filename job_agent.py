@@ -4,8 +4,9 @@ Sustainability Job Agent for Lucas Switsers de Roeck
 Scrapes LinkedIn, Indeed, VDAB, Jobat, Stepstone, Actiris, EU/UN portals,
 dedicated climate/impact job boards, and internship-focused boards
 (Studentjob.be, ErasmusIntern, Idealist, ReliefWeb, Devex) for sustainability
-roles AND internships in Belgium, scores with Claude AI, and pushes results
-to Notion — with internships clearly tagged separately from paid vacancies.
+roles in Belgium, scores with Claude AI, and pushes results to Notion.
+Paid positions only: internships are filtered out, and postings that ask for
+more than 3 years of experience as their minimum are dropped.
 
 Changes from the previous version (see CHANGES.md for the full rationale):
   1. Two-tier scraping engine: every site is first read as plain HTML and
@@ -57,9 +58,13 @@ MIN_SCORE = 6
 # Internship postings tend to have thinner descriptions to score against,
 # so a slightly lower bar keeps genuinely relevant ones from being dropped.
 MIN_SCORE_INTERNSHIP = 5
-# Candidate profile says "max ~3-4 years experience required" — used by
-# is_too_much_experience() below.
-MAX_YEARS_EXPERIENCE = 4
+# Highest MINIMUM experience a posting may ask for. "2-4 years" or "3+ years"
+# passes; "5-8 years" or "minstens 5 jaar" doesn't. Used by
+# min_years_required() / is_too_much_experience() below and by Claude's check.
+MAX_YEARS_EXPERIENCE = 3
+# Paid positions only: internships, stages and thesis placements are dropped
+# (see is_internship_posting()). Paid graduate/trainee programmes stay.
+EXCLUDE_INTERNSHIPS = True
 # Set to False to skip the headless-browser fallback entirely (keeps the
 # agent dependency-light, at the cost of missing every JS-only site).
 ENABLE_PLAYWRIGHT_FALLBACK = True
@@ -81,7 +86,8 @@ Work experience (~1 year total):
 - Sustainability Associate, University of Antwerp Climate Team (2023–2024)
 Key skills: CSRD, ESG, sustainability consulting, environmental science, marketing, behavior change
 Languages: Dutch (native), English (fluent), French (professional)
-Seniority target: junior to medior only (max ~3–4 years experience required)
+Seniority target: junior to medior only (postings may ask for at most 3 years of experience)
+Looking for: paid positions only, no internships
 Geography: Belgium only
 """
 
@@ -290,7 +296,7 @@ def _parse_jsonld_jobpostings(soup: BeautifulSoup, source_name: str,
                         addr.get("addressLocality", ""), addr.get("addressCountry", "")]))
             url = item.get("url") or ""
             desc_html = item.get("description", "") or ""
-            description = BeautifulSoup(desc_html, "html.parser").get_text(" ", strip=True)[:2000]
+            description = BeautifulSoup(desc_html, "html.parser").get_text(" ", strip=True)[:8000]
             date_posted = item.get("datePosted", "")
             if title and url:
                 jobs.append({"id": url + title, "title": title, "company": company,
@@ -681,12 +687,12 @@ def fetch_description(url: str) -> str:
                          "div#jobDescriptionText", "div.job-description"]:
             el = soup.select_one(selector)
             if el:
-                text = el.get_text(separator=" ", strip=True)[:2000]
+                text = el.get_text(separator=" ", strip=True)[:8000]
                 break
         if not text:
             main = soup.select_one("main, article")
             if main:
-                text = main.get_text(separator=" ", strip=True)[:2000]
+                text = main.get_text(separator=" ", strip=True)[:8000]
     except Exception:
         pass
     # Many description pages are also JS-rendered; if the static fetch came
@@ -699,7 +705,7 @@ def fetch_description(url: str) -> str:
                              "div#jobDescriptionText", "div.job-description", "main", "article"]:
                 el = soup.select_one(selector)
                 if el:
-                    candidate = el.get_text(separator=" ", strip=True)[:2000]
+                    candidate = el.get_text(separator=" ", strip=True)[:8000]
                     if len(candidate) > len(text):
                         text = candidate
                     break
@@ -707,23 +713,114 @@ def fetch_description(url: str) -> str:
 
 
 # ─── Title / seniority / relevance filters ─────────────────────────────────────
-def is_too_much_experience(job: dict) -> bool:
-    """Return True if the job explicitly requires more than MAX_YEARS_EXPERIENCE years."""
+# Experience requirements, in English, Dutch and French. A range counts by its
+# lower end: "2-4 years" asks for 2, "5 à 8 ans" asks for 5.
+_NUM_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10,
+    "een": 1, "één": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5, "zes": 6,
+    "zeven": 7, "acht": 8, "negen": 9, "tien": 10,
+    "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5, "sept": 7,
+    "huit": 8, "neuf": 9, "dix": 10,
+}
+_NUM = r"(\d{1,2}|" + "|".join(sorted(_NUM_WORDS, key=len, reverse=True)) + r")"
+_RANGE = _NUM + r"(?:\s*(?:-|–|—|to|tot|à|ou|or|of)\s*" + _NUM + r")?\s*\+?"
+_YEARS = r"(?:years?|yrs?|jaar|jaren|ans?|années?)"
+_EXP = r"(?:experience|expérience|ervaring|werkervaring|beroepservaring)"
+_EXPERIENCE_PATTERNS = [
+    # "5+ years of relevant experience", "3-5 jaar relevante ervaring", "5 à 8 ans d'expérience"
+    re.compile(r"\b" + _RANGE + r"\s*" + _YEARS + r"['’]?s?(?:\W+\w+){0,6}?\W+" + _EXP),
+    # "experience of 5 years", "ervaring van minstens 5 jaar", "expérience de 5 ans"
+    re.compile(_EXP + r"(?:\W+\w+){0,4}?\W+" + _RANGE + r"\s*" + _YEARS + r"\b"),
+    # "at least 5 years in consulting", "minstens 5 jaar in een gelijkaardige functie"
+    re.compile(r"(?:at\s+least|minimum(?:\s+of)?|min\.|minstens|minimaal|ten\s+minste|"
+               r"au\s+moins|minimum\s+de)\s+" + _RANGE + r"\s*" + _YEARS + r"\b"),
+]
+# "our 25 years of experience", "met meer dan 10 jaar ervaring is ons bedrijf..."
+_ABOUT_THE_COMPANY = re.compile(r"\b(our|we have|we've|onze|wij hebben|we hebben|notre|nous avons|"
+                                r"company|bedrijf|entreprise|société)\b[^.]{0,30}$")
+
+
+def _to_number(token: str):
+    token = (token or "").lower()
+    return int(token) if token.isdigit() else _NUM_WORDS.get(token)
+
+
+def min_years_required(job: dict):
+    """The minimum years of experience the posting asks for (the highest one
+    when it names several), or None when it doesn't say."""
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
-    patterns = [
-        r'(\d+)\s*\+?\s*years?\s*(of\s*)?(experience|exp)',
-        r'(\d+)\s*\+?\s*jaar\s*(ervaring|werkervaring)',
-        r'minimum\s*(\d+)\s*(years?|jaar)',
-        r'at\s*least\s*(\d+)\s*years?',
-        r'minstens\s*(\d+)\s*jaar',
-        r'(\d+)\s*to\s*\d+\s*years?\s*(of\s*)?experience',
-    ]
-    for pattern in patterns:
-        for match in re.findall(pattern, text):
-            years = int(match[0]) if match[0].isdigit() else 0
-            if years > MAX_YEARS_EXPERIENCE:
-                return True
-    return False
+    found = []
+    for pattern in _EXPERIENCE_PATTERNS:
+        for m in pattern.finditer(text):
+            if _ABOUT_THE_COMPANY.search(text[max(0, m.start() - 40):m.start()]):
+                continue
+            low = _to_number(m.group(1))
+            if low is not None and 0 <= low <= 15:   # bigger numbers are company history
+                found.append(low)
+    return max(found) if found else None
+
+
+def is_too_much_experience(job: dict) -> bool:
+    """True if the posting asks for more than MAX_YEARS_EXPERIENCE years as its minimum,
+    by its own text or by Claude's reading of it."""
+    years = min_years_required(job)
+    if years is not None and years > MAX_YEARS_EXPERIENCE:
+        return True
+    claude_years = job.get("claude_min_years")
+    return isinstance(claude_years, (int, float)) and claude_years > MAX_YEARS_EXPERIENCE
+
+
+# Internships, stages and thesis placements. "Trainee" is deliberately NOT here:
+# in Belgium a trainee or graduate programme is usually a paid job.
+_INTERNSHIP_TITLE_RE = re.compile(
+    r"\bintern(?:ship)?s?\b|(?<!early )(?<!early-)(?<!late )(?<!late-)\bstages?\b|"
+    r"\bstagiair\w*\b|\bstagiaire\b|\bafstudeerstage\b|\bstageplaats\b|\bwerkplekleren\b|"
+    r"\bwork\s*placement\b|\bpraktikum\b|\bmasterproef\b|\bthesis\s+(?:student|internship|placement)\b",
+    re.IGNORECASE)
+_INTERNSHIP_DESC_RE = re.compile(
+    r"\b(?:this|our|unpaid|paid)\s+internship\b|\binternship\s+(?:position|opportunity|period|duration)\b|"
+    r"\binternship\s+of\s+\d|\bstageplaats\b|\bstagevergoeding\b|\bonbetaalde\s+stage\b|"
+    r"\bstage\s+van\s+\d|\bconvention\s+de\s+stage\b|\bstage\s+de\s+fin\s+d['’]études\b|"
+    r"\bstage\s+non\s+rémunéré\b|\bunpaid\s+(?:position|role|placement)\b",
+    re.IGNORECASE)
+
+
+_EXPERIENCE_SENTENCE_RE = re.compile(
+    r"[^.!?\n•]*\b(?:experience|expérience|ervaring|werkervaring|years?|jaar|ans)\b[^.!?\n•]*",
+    re.IGNORECASE)
+
+
+def _experience_snippet(description: str, limit: int = 400) -> str:
+    """The sentences that mention experience or years, so Claude sees the
+    requirement even when it sits far down a long posting."""
+    hits = [h.strip() for h in _EXPERIENCE_SENTENCE_RE.findall(description or "")
+            if re.search(r"\d|one|two|three|four|five|twee|drie|vier|vijf|deux|trois|quatre|cinq", h, re.I)]
+    return " … ".join(hits)[:limit]
+
+
+def is_internship_posting(job: dict) -> bool:
+    """Judged from the posting itself, not from which search found it, so a
+    paid starter job on a student board isn't thrown out with the internships."""
+    if _INTERNSHIP_TITLE_RE.search(job.get("title", "") or ""):
+        return True
+    return bool(_INTERNSHIP_DESC_RE.search(job.get("description", "") or ""))
+
+
+def apply_paid_and_experience_filters(jobs: list[dict], label: str) -> list[dict]:
+    """Drop internships and postings asking for more than MAX_YEARS_EXPERIENCE
+    years, once the full posting text is available."""
+    kept, interns, too_much = [], 0, 0
+    for j in jobs:
+        if EXCLUDE_INTERNSHIPS and j.get("is_internship"):
+            interns += 1
+        elif is_too_senior(j) or is_too_much_experience(j):
+            too_much += 1
+        else:
+            kept.append(j)
+    print(f"[Filter] {label}: {len(kept)} kept, {interns} internships dropped, "
+          f"{too_much} dropped for asking more than {MAX_YEARS_EXPERIENCE} years or senior level")
+    return kept
 
 
 def is_too_senior(job: dict) -> bool:
@@ -778,23 +875,25 @@ JOB {idx + 1}:
 Title: {j['title']}
 Company: {j['company']}
 Location: {j['location']}
-Likely type so far: {"Internship/traineeship" if j.get('is_internship') else "Unknown — please judge from title/description"}
 Description: {j['description'][:600] or '(none)'}
+Experience requirements in the posting: {_experience_snippet(j['description']) or '(none found)'}
 """
-        prompt = f"""You are a career advisor helping a sustainability candidate find jobs AND internships in Belgium.
+        prompt = f"""You are a career advisor helping a sustainability candidate find PAID jobs in Belgium.
+He is not looking for internships.
 CANDIDATE PROFILE:
 {CANDIDATE_PROFILE}
 JOBS TO EVALUATE:
 {job_list_text}
 Respond ONLY with a valid JSON array. Each element:
 - "job_index": integer (1-based)
-- "score": integer 1-10 (score internships on relevance/fit the same way you would a job — do not penalize just for being an internship)
+- "score": integer 1-10
 - "reasoning": string (2-3 sentences)
 - "match_highlights": list of up to 3 short strings
-- "seniority_ok": boolean — false if this role clearly needs more seniority/experience than the candidate has
+- "min_years_required": integer or null — the MINIMUM years of work experience the posting asks for (for a range like "5-8 years" give the lower end, 5). null if it doesn't say.
+- "seniority_ok": boolean — false if the posting asks for more than {MAX_YEARS_EXPERIENCE} years of experience as its minimum, or is clearly a senior or management role
 - "location_ok": boolean — false if this role is clearly not based in or reachable from Belgium
 - "spontaneous_worthy": boolean
-- "is_internship": boolean — true if this posting is an internship, traineeship, "stage", or similar unpaid/training placement rather than a regular paid position
+- "is_internship": boolean — true if this posting is an internship, "stage", thesis placement, or other unpaid or student placement. False for regular paid jobs and for paid graduate or trainee programmes.
 - "deadline": string in YYYY-MM-DD format if an application deadline is mentioned, otherwise ""
 Return ONLY the JSON array."""
         try:
@@ -816,6 +915,7 @@ Return ONLY the JSON array."""
                         "location_ok": s.get("location_ok", True),
                         "spontaneous_worthy": s.get("spontaneous_worthy", False),
                         "deadline": s.get("deadline", ""),
+                        "claude_min_years": s.get("min_years_required"),
                     })
                     batch[idx]["is_internship"] = bool(batch[idx].get("is_internship")) or bool(s.get("is_internship", False))
         except Exception as e:
@@ -1090,20 +1190,7 @@ def run_agent():
     indeed_queries   = ["sustainability Belgium", "ESG CSRD Belgium", "environmental Belgium",
                         "duurzaamheid", "milieu adviseur"]
 
-    linkedin_internship_queries = ["sustainability internship Belgium", "ESG internship Belgium",
-                        "CSRD internship Belgium", "environmental internship Belgium",
-                        "climate internship Belgium", "stage duurzaamheid",
-                        "stage milieu", "stage CSRD", "sustainability trainee Belgium"]
-    vdab_internship_keywords = ["stage duurzaamheid", "stage milieu", "stage CSRD",
-                        "afstudeerstage duurzaamheid", "stage klimaat"]
-    jobat_internship_queries = ["stage duurzaamheid", "internship sustainability",
-                        "stage milieu", "trainee ESG", "stage NGO"]
-    stepstone_internship_queries = ["internship sustainability Belgium", "stage duurzaamheid",
-                        "traineeship ESG Belgium"]
-    actiris_internship_keywords = ["stage duurzaamheid", "internship sustainability",
-                        "stage environnement"]
-    indeed_internship_queries = ["sustainability internship Belgium", "ESG internship Belgium",
-                        "stage duurzaamheid"]
+    # Internship searches removed: paid positions only.
     studentjob_queries = ["duurzaamheid", "sustainability", "ESG", "milieu", "CSRD"]
     idealist_queries = ["sustainability", "environment", "climate"]
     devex_queries = ["sustainability", "environment", "climate"]
@@ -1117,57 +1204,30 @@ def run_agent():
         print(f"[LinkedIn] '{q}'")
         _extend(scrape_linkedin(q), "General")
         time.sleep(3)
-    for q in linkedin_internship_queries:
-        print(f"[LinkedIn Internship] '{q}'")
-        _extend(scrape_linkedin(q, internship=True), "General")
-        time.sleep(3)
     for k in vdab_keywords:
         print(f"[VDAB]     '{k}'")
         _extend(scrape_vdab(k), "General")
-        time.sleep(2)
-    for k in vdab_internship_keywords:
-        print(f"[VDAB Internship] '{k}'")
-        _extend(scrape_vdab(k, internship=True), "General")
         time.sleep(2)
     for q in jobat_queries:
         print(f"[Jobat]    '{q}'")
         _extend(scrape_jobat(q), "General")
         time.sleep(2)
-    for q in jobat_internship_queries:
-        print(f"[Jobat Internship] '{q}'")
-        _extend(scrape_jobat(q, internship=True), "General")
-        time.sleep(2)
     for q in stepstone_queries:
         print(f"[Stepstone] '{q}'")
         _extend(scrape_stepstone(q), "General")
-        time.sleep(2)
-    for q in stepstone_internship_queries:
-        print(f"[Stepstone Internship] '{q}'")
-        _extend(scrape_stepstone(q, internship=True), "General")
         time.sleep(2)
     for k in actiris_keywords:
         print(f"[Actiris]  '{k}'")
         _extend(scrape_actiris(k), "General")
         time.sleep(2)
-    for k in actiris_internship_keywords:
-        print(f"[Actiris Internship] '{k}'")
-        _extend(scrape_actiris(k, internship=True), "General")
-        time.sleep(2)
     for q in indeed_queries:
         print(f"[Indeed]   '{q}'")
         _extend(scrape_indeed(q), "General")
-        time.sleep(2)
-    for q in indeed_internship_queries:
-        print(f"[Indeed Internship] '{q}'")
-        _extend(scrape_indeed(q, internship=True), "General")
         time.sleep(2)
     for q in studentjob_queries:
         print(f"[Studentjob.be] '{q}'")
         _extend(scrape_studentjob(q), "General")
         time.sleep(2)
-    print(f"[ErasmusIntern]")
-    _extend(scrape_erasmusintern(), "General")
-    time.sleep(2)
     for q in idealist_queries:
         print(f"[Idealist] '{q}'")
         _extend(scrape_idealist(q), "General")
@@ -1204,7 +1264,7 @@ def run_agent():
 
     all_jobs = deduplicate(all_jobs)
     for j in all_jobs:
-        j["is_internship"] = is_internship(j)
+        j["is_internship"] = is_internship_posting(j)
 
     print(f"\n[Merge] Grouping crossposted/duplicate listings...")
     before_merge = len(all_jobs)
@@ -1228,22 +1288,30 @@ def run_agent():
     new_jobs = [j for j in new_jobs if not is_excluded_employer(j)]
     print(f"[Filter] {len(new_jobs)} after excluded-employer filter")
 
-    new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_senior(j)]
-    print(f"[Filter] {len(new_jobs)} after seniority filter")
-    new_jobs = [j for j in new_jobs if j.get("is_internship") or not is_too_much_experience(j)]
-    print(f"[Filter] {len(new_jobs)} after experience filter (max {MAX_YEARS_EXPERIENCE} years)")
+    if EXCLUDE_INTERNSHIPS:
+        new_jobs = [j for j in new_jobs if not j.get("is_internship")]
+        print(f"[Filter] {len(new_jobs)} after internship filter (title)")
+    # Cheap pass on what's known so far; the real check follows once the full
+    # posting is in (most scraped jobs have no description yet at this point).
+    new_jobs = [j for j in new_jobs if not is_too_senior(j) and not is_too_much_experience(j)]
+    print(f"[Filter] {len(new_jobs)} after seniority/experience pre-check")
 
     if not new_jobs:
         print("\n[Done] No new jobs this run.")
+        close_browser()
         return
 
     print(f"\n[Fetch] Getting descriptions for {len(new_jobs)} jobs...")
     for j in new_jobs:
-        if not j["description"]:
-            j["description"] = fetch_description(j["url"])
+        # Snippets from search pages rarely include the requirements section
+        if len(j["description"]) < 600:
+            fuller = fetch_description(j["url"])
+            if len(fuller) > len(j["description"]):
+                j["description"] = fuller
             time.sleep(0.8)
-        if not j["is_internship"]:
-            j["is_internship"] = is_internship(j)
+        j["is_internship"] = is_internship_posting(j)
+
+    new_jobs = apply_paid_and_experience_filters(new_jobs, "job boards")
 
     new_jobs = [j for j in new_jobs if has_role_relevance(j)]
     print(f"[Filter] {len(new_jobs)} after role/title relevance filter")
@@ -1253,8 +1321,10 @@ def run_agent():
 
     print(f"\n[Claude] Scoring {len(new_jobs)} jobs with AI...")
     scored_jobs = score_jobs_with_claude(new_jobs)
-    scored_jobs = [j for j in scored_jobs if j.get("seniority_ok", True) and j.get("location_ok", True)]
-    print(f"[Filter] {len(scored_jobs)} after Claude's own seniority/location check")
+    scored_jobs = [j for j in scored_jobs if j.get("seniority_ok", True) and j.get("location_ok", True)
+                   and not is_too_much_experience(j)
+                   and not (EXCLUDE_INTERNSHIPS and j.get("is_internship"))]
+    print(f"[Filter] {len(scored_jobs)} after Claude's own experience/internship/location check")
 
     print(f"\n[Company scraper] Scraping company careers pages...")
     company_jobs = run_company_scraper()
@@ -1265,6 +1335,15 @@ def run_agent():
     # to every other source.
     before_company_filter = len(company_jobs)
     company_jobs = [j for j in company_jobs if not is_excluded_employer(j)]
+    # Their "description" is the company's blurb from companies.json, not the
+    # posting, so read the posting itself before checking experience/internship.
+    for j in company_jobs:
+        posting = fetch_description(j["url"])
+        if len(posting) > 200:
+            j["description"] = posting
+        j["is_internship"] = is_internship_posting(j)
+        time.sleep(0.5)
+    company_jobs = apply_paid_and_experience_filters(company_jobs, "company sites")
     company_jobs = [j for j in company_jobs if has_role_relevance(j)]
     if before_company_filter:
         print(f"  [Company scraper] {before_company_filter} -> {len(company_jobs)} "
