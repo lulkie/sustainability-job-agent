@@ -62,6 +62,10 @@ MIN_SCORE_INTERNSHIP = 5
 # passes; "5-8 years" or "minstens 5 jaar" doesn't. Used by
 # min_years_required() / is_too_much_experience() below and by Claude's check.
 MAX_YEARS_EXPERIENCE = 3
+# Postings whose minimum is above MAX_YEARS_EXPERIENCE but not above this are
+# still sent to Notion, with "⚠️ [CHECK EXPERIENCE]" in front of the title, so
+# you can decide yourself. Anything asking for more is dropped.
+HARD_MAX_YEARS_EXPERIENCE = 4
 # Paid positions only: internships, stages and thesis placements are dropped
 # (see is_internship_posting()). Paid graduate/trainee programmes stay.
 EXCLUDE_INTERNSHIPS = True
@@ -747,8 +751,9 @@ def _to_number(token: str):
 
 
 def min_years_required(job: dict):
-    """The minimum years of experience the posting asks for (the highest one
-    when it names several), or None when it doesn't say."""
+    """The minimum years of experience the posting asks for, or None when it
+    doesn't say. When it names several figures ("2 years required, 5 is a
+    plus"), the LOWEST one counts, so a nice-to-have doesn't sink the job."""
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
     found = []
     for pattern in _EXPERIENCE_PATTERNS:
@@ -758,17 +763,27 @@ def min_years_required(job: dict):
             low = _to_number(m.group(1))
             if low is not None and 0 <= low <= 15:   # bigger numbers are company history
                 found.append(low)
-    return max(found) if found else None
+    return min(found) if found else None
+
+
+def _required_years(job: dict):
+    """Lowest minimum found by the regex or by Claude, whichever is known."""
+    vals = [v for v in (min_years_required(job), job.get("claude_min_years"))
+            if isinstance(v, (int, float))]
+    return min(vals) if vals else None
 
 
 def is_too_much_experience(job: dict) -> bool:
-    """True if the posting asks for more than MAX_YEARS_EXPERIENCE years as its minimum,
-    by its own text or by Claude's reading of it."""
-    years = min_years_required(job)
-    if years is not None and years > MAX_YEARS_EXPERIENCE:
-        return True
-    claude_years = job.get("claude_min_years")
-    return isinstance(claude_years, (int, float)) and claude_years > MAX_YEARS_EXPERIENCE
+    """True if the posting clearly asks for more than HARD_MAX_YEARS_EXPERIENCE
+    years as its minimum. Unclear postings are kept."""
+    years = _required_years(job)
+    return years is not None and years > HARD_MAX_YEARS_EXPERIENCE
+
+
+def needs_experience_check(job: dict) -> bool:
+    """Kept, but asks a bit more than MAX_YEARS_EXPERIENCE: flag it in Notion."""
+    years = _required_years(job)
+    return years is not None and MAX_YEARS_EXPERIENCE < years <= HARD_MAX_YEARS_EXPERIENCE
 
 
 # Internships, stages and thesis placements. "Trainee" is deliberately NOT here:
@@ -819,13 +834,17 @@ def apply_paid_and_experience_filters(jobs: list[dict], label: str) -> list[dict
         else:
             kept.append(j)
     print(f"[Filter] {label}: {len(kept)} kept, {interns} internships dropped, "
-          f"{too_much} dropped for asking more than {MAX_YEARS_EXPERIENCE} years or senior level")
+          f"{too_much} dropped for asking more than {HARD_MAX_YEARS_EXPERIENCE} years or a senior title")
     return kept
 
 
 def is_too_senior(job: dict) -> bool:
-    text = (job.get("title", "") + " " + job.get("description", "")).lower()
-    return any(kw.lower() in text for kw in SENIOR_BLOCKLIST)
+    """Title only: in a full posting, words like "director", "head of" or
+    "principal" mostly appear in sentences such as "you report to the
+    director", which said nothing about this job's level. Experience demands
+    in the text are handled by is_too_much_experience()."""
+    title = (job.get("title", "") or "").lower()
+    return any(kw.lower() in title for kw in SENIOR_BLOCKLIST)
 
 
 def is_offtopic_title(job: dict) -> bool:
@@ -890,7 +909,7 @@ Respond ONLY with a valid JSON array. Each element:
 - "reasoning": string (2-3 sentences)
 - "match_highlights": list of up to 3 short strings
 - "min_years_required": integer or null — the MINIMUM years of work experience the posting asks for (for a range like "5-8 years" give the lower end, 5). null if it doesn't say.
-- "seniority_ok": boolean — false if the posting asks for more than {MAX_YEARS_EXPERIENCE} years of experience as its minimum, or is clearly a senior or management role
+- "seniority_ok": boolean — false only if the posting clearly asks for more than {HARD_MAX_YEARS_EXPERIENCE} years of experience as its minimum, or is clearly a senior or management role (director, head of, manager of a team). When unsure, true.
 - "location_ok": boolean — false if this role is clearly not based in or reachable from Belgium
 - "spontaneous_worthy": boolean
 - "is_internship": boolean — true if this posting is an internship, "stage", thesis placement, or other unpaid or student placement. False for regular paid jobs and for paid graduate or trainee programmes.
@@ -1012,6 +1031,8 @@ def push_to_notion(jobs: list[dict], spontaneous: list[dict]):
         title_text = job.get("title", "")
         if is_intern:
             title_text = f"🎓 [INTERNSHIP] {title_text}"
+        if needs_experience_check(job):
+            title_text = f"⚠️ [CHECK EXPERIENCE] {title_text}"
         properties = {
             "Job Title": {"title": [{"text": {"content": title_text}}]},
             "Company": {"rich_text": [{"text": {"content": job.get("company", "")}}]},
@@ -1190,7 +1211,13 @@ def run_agent():
     indeed_queries   = ["sustainability Belgium", "ESG CSRD Belgium", "environmental Belgium",
                         "duurzaamheid", "milieu adviseur"]
 
-    # Internship searches removed: paid positions only.
+    # Paid trainee and graduate programmes (internships themselves stay filtered out).
+    linkedin_queries += ["sustainability trainee Belgium", "ESG graduate programme Belgium",
+                         "junior sustainability Belgium"]
+    vdab_keywords    += ["trainee duurzaamheid", "junior duurzaamheid"]
+    jobat_queries    += ["trainee ESG", "trainee duurzaamheid", "junior sustainability"]
+    stepstone_queries+= ["traineeship ESG Belgium", "graduate sustainability Belgium"]
+    indeed_queries   += ["sustainability trainee Belgium", "junior ESG Belgium"]
     studentjob_queries = ["duurzaamheid", "sustainability", "ESG", "milieu", "CSRD"]
     idealist_queries = ["sustainability", "environment", "climate"]
     devex_queries = ["sustainability", "environment", "climate"]
